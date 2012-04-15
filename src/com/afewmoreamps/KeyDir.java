@@ -33,7 +33,18 @@ public class KeyDir {
         public final long timestamp;
         public final byte flags;
 
-        private KDEntry(byte contents[]) {
+        /*
+         * Null KDEntry for return by compareAndSet when the expected value ends up being null
+         */
+        private KDEntry() {
+            fileId = -1;
+            valueSize = -1;
+            valuePos = -1;
+            timestamp = -1;
+            flags = -1;
+        }
+
+        KDEntry(byte contents[]) {
             ByteBuffer buf = ByteBuffer.wrap(contents);
             fileId = buf.getInt();
             valueSize = buf.getInt();
@@ -50,6 +61,17 @@ public class KeyDir {
             out.putLong(timestamp);
             out.put(flags);
             assert(out.position() == out.capacity());
+        }
+
+        public static byte[] toBytes(int fileId, int valueSize, int valuePos, long timestamp, byte flags) {
+            ByteBuffer out = ByteBuffer.allocate(SIZE);
+            out.putInt(fileId);
+            out.putInt(valueSize);
+            out.putInt(valuePos);
+            out.putLong(timestamp);
+            out.put(flags);
+            assert(out.position() == out.capacity());
+            return out.array();
         }
     }
 
@@ -70,7 +92,12 @@ public class KeyDir {
         } finally {
             m_lock.writeLock().unlock();
         }
-        return new KDEntry(found);
+
+        if (found == null) {
+            return new KDEntry();
+        } else {
+            return new KDEntry(found);
+        }
     }
 
     /*
@@ -119,7 +146,12 @@ public class KeyDir {
         assert(m_lock.getReadHoldCount() == 0);
         m_lock.readLock().lock();
         try {
-            return new KDEntry(m_keys.get(key));
+            byte entry[] = m_keys.get(key);
+            if (entry != null) {
+                return new KDEntry(entry);
+            } else {
+                return null;
+            }
         } finally {
             m_lock.readLock().unlock();
         }
@@ -143,5 +175,14 @@ public class KeyDir {
         } finally {
             m_lock.writeLock().unlock();
         }
+    }
+
+    /**
+     * Leak the keydir at startup to bypass locking
+     * since it is single threaded
+     * @return
+     */
+    public TreeMap<byte[], byte[]> leakKeyDir() {
+        return m_keys;
     }
 }

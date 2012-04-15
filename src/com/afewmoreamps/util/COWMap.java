@@ -14,7 +14,7 @@
 package com.afewmoreamps.util;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.TreeMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
@@ -27,7 +27,7 @@ public class COWMap<K, V> implements Map<K, V> {
     private final AtomicReference<Map<K, V>> m_map;
 
     public COWMap() {
-        m_map = new AtomicReference<Map<K, V>>(Collections.unmodifiableMap(new HashMap<K, V>()));
+        m_map = new AtomicReference<Map<K, V>>(Collections.unmodifiableMap(new TreeMap<K, V>()));
     }
 
     public COWMap(Map<K, V> map) {
@@ -70,7 +70,7 @@ public class COWMap<K, V> implements Map<K, V> {
     public V put(K key, V value) {
         while (true) {
             Map<K, V> original = m_map.get();
-            HashMap<K, V> copy = new HashMap<K, V>(m_map.get());
+            TreeMap<K, V> copy = new TreeMap<K, V>(m_map.get());
             V oldValue = (V)copy.put(key, value);
             if (m_map.compareAndSet(original, Collections.unmodifiableMap(copy))) {
                 return oldValue;
@@ -82,7 +82,7 @@ public class COWMap<K, V> implements Map<K, V> {
     public V remove(Object key) {
         while (true) {
             Map<K, V> original = m_map.get();
-            HashMap<K, V> copy = new HashMap<K, V>(m_map.get());
+            TreeMap<K, V> copy = new TreeMap<K, V>(m_map.get());
             V oldValue = (V)copy.remove(key);
             if (m_map.compareAndSet(original, Collections.unmodifiableMap(copy))) {
                 return oldValue;
@@ -94,7 +94,7 @@ public class COWMap<K, V> implements Map<K, V> {
     public void putAll(Map<? extends K, ? extends V> m) {
         while (true) {
             Map<K, V> original = m_map.get();
-            HashMap<K, V> copy = new HashMap<K, V>(m_map.get());
+            TreeMap<K, V> copy = new TreeMap<K, V>(m_map.get());
             copy.putAll(m);
             if (m_map.compareAndSet(original, Collections.unmodifiableMap(copy))) {
                 return;
@@ -106,7 +106,7 @@ public class COWMap<K, V> implements Map<K, V> {
     public void clear() {
         while (true) {
             Map<K, V> original = m_map.get();
-            HashMap<K, V> replacement = new HashMap<K, V>();
+            TreeMap<K, V> replacement = new TreeMap<K, V>();
             if (m_map.compareAndSet(original, Collections.unmodifiableMap(replacement))) {
                 return;
             }

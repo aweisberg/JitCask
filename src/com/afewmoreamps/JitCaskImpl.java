@@ -18,14 +18,12 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
-import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileChannel.MapMode;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
-import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -34,7 +32,6 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.zip.CRC32;
 
 import com.afewmoreamps.KeyDir.KDEntry;
@@ -91,14 +88,10 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
     }
 
     private static class MiniCask implements Iterable<CaskEntry> {
-        /*
-         * Read locks are shared by readers and appenders. The write lock is for deleting the file
-         * from the merge thread. It must acquire the write lock on a file before deleting it.
-         * The locks aren't necessary if there is no merge thread since files are never mutated/removed/closed
-         * without one.
-         */
-        private final ReentrantReadWriteLock m_lock = new ReentrantReadWriteLock(true);
         private final File m_path;
+        /*
+         * Kept around for truncation at the end
+         */
         private final FileChannel m_outChannel;
         private final MappedByteBuffer m_buffer;
         private final int HEADER_SIZE = 15;//8-byte timestamp, 1-byte flags, 2-byte key length, 4-byte value length
@@ -111,14 +104,16 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
         public MiniCask(File path, int id) throws IOException {
             m_path = path;
             m_fileId = id;
+            final boolean existed = path.exists();
             RandomAccessFile ras = new RandomAccessFile(m_path, "rw");
             m_outChannel = ras.getChannel();
-            if (path.exists()) {
+            if (!existed) {
                 m_buffer = m_outChannel.map(MapMode.READ_WRITE, 0, Integer.MAX_VALUE);
                 m_fileLength = new AtomicInteger();
             } else {
                 m_buffer = m_outChannel.map(MapMode.READ_ONLY, 0, m_outChannel.size());
-                m_fileLength = null;
+                m_fileLength = new AtomicInteger((int)m_outChannel.size());
+                m_outChannel.close();
             }
         }
 
@@ -127,8 +122,9 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
          */
         public boolean addEntry(long timestamp, byte key[], byte value[], boolean compressedValue, KeyDir keyDir)
                 throws IOException {
-            assert(m_lock.getReadHoldCount() == 1);
-            if (m_buffer.remaining() < HEADER_SIZE + key.length + (value != null ? value.length : 0)) {
+            if (m_buffer.remaining() < HEADER_SIZE + key.length + (value != null ? value.length + 4 : 0)) {
+                m_outChannel.truncate(m_buffer.position() + 1);
+                m_outChannel.close();
                 return false;
             }
             final byte flags = compressedValue ? (byte)1 : (byte)0;
@@ -148,19 +144,19 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
             m_headerBytes.putInt(valueLength);
             crc.update(m_headerBytes.array());
             crc.update(key);
-            if (value != null) {
-                crc.update(value);
-            }
-            final int crcResult = (int)crc.getValue();
+            final int headerCRC = (int)crc.getValue();
 
-            final int valuePosition = m_buffer.position();
-            m_buffer.putInt(crcResult);
+            m_buffer.putInt(headerCRC);
             m_buffer.putLong(timestamp);
             m_buffer.put(flags);
             m_buffer.putShort(keyLength);
             m_buffer.putInt(valueLength);
             m_buffer.put(key);
+            final int valuePosition = m_buffer.position();
             if (value != null) {
+                crc.reset();
+                crc.update(value);
+                m_buffer.putInt((int)crc.getValue());
                 m_buffer.put(value);
             }
 
@@ -168,7 +164,7 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
              * This is the size of the entire record and not just the payload
              * associated with the key
              */
-            final int valueSize = m_buffer.position() - valuePosition;
+            final int valueSize = m_buffer.position() - valuePosition - 4;//-4 don't include crc
 
             if (valueLength != -1) {
                 /*
@@ -190,29 +186,25 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
             return true;
         }
 
-        public byte[] getValue(int position, int length, int keySize) throws IOException {
-            assert(m_lock.getReadHoldCount() == 1);
-            assert(position < m_outChannel.size());
-            if (!m_outChannel.isOpen()) {
-                throw new ClosedChannelException();
+        public byte[] getValue(int position, int length, boolean decompress) throws IOException {
+            if (m_fileLength == null) {
+                assert(position < m_buffer.limit());
+            } else {
+                assert(position < m_fileLength.get());
             }
             ByteBuffer dup = m_buffer.asReadOnlyBuffer();
             dup.position(position);
 
-            final int originalCRC = dup.getInt(position);
-            final boolean decompress = dup.get(position + 12) == 1;
-
-            byte headerBytes[] = new byte[HEADER_SIZE + keySize];
-            dup.get(headerBytes);
-            byte valueBytes[] = new byte[length - headerBytes.length];
+            final int originalCRC = dup.getInt();
+            byte valueBytes[] = new byte[length];
             dup.get(valueBytes);
 
             CRC32 crc = new CRC32();
-            crc.update(headerBytes);
             crc.update(valueBytes);
             final int actualCRC = (int)crc.getValue();
 
             if (actualCRC != originalCRC) {
+                System.out.println("Actual length was " + length);
                 throw new IOException("CRC mismatch in record");
             }
 
@@ -223,18 +215,9 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
         }
 
         public Iterator<CaskEntry> iterator() {
-            assert(m_lock.getReadHoldCount() == 1);
             final ByteBuffer view = m_buffer.asReadOnlyBuffer();
             view.position(0);
-            try {
-                if (m_fileLength != null) {
-                    view.limit(m_fileLength.get());
-                } else {
-                    view.limit((int)m_outChannel.size());
-                }
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
+            view.limit(m_fileLength.get());
 
             return new Iterator<CaskEntry>() {
                 private CaskEntry nextEntry = getNextEntry();
@@ -249,7 +232,7 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
                         ByteBuffer header = ByteBuffer.allocate(HEADER_SIZE + 4);
                         view.get(header.array());
 
-                        final int originalCRC = header.getInt();
+                        final int originalHeaderCRC = header.getInt();
                         final long timestamp = header.getLong();
                         final byte flags = header.get();
                         final short keySize = header.getShort();
@@ -264,22 +247,41 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
                         if (view.remaining() < keySize + actualValueSize) {
                             return null;
                         }
+                        if (keySize < 0) {
+                            System.out.println("Uhoh");
+                        }
                         final byte keyBytes[] = new byte[keySize];
-                        final byte valueBytes[] = new byte[actualValueSize];
                         view.get(keyBytes);
-                        final int valuePosition = view.position();
-                        view.get(valueBytes);
                         crc.update(keyBytes);
-                        crc.update(valueBytes);
-                        final int currentCRC = (int)crc.getValue();
-
-                        if (currentCRC != originalCRC) {
-                            System.err.println("Had a corrupt entry in " + m_path + " at position " + startPosition);
+                        final int actualHeaderCRC = (int)crc.getValue();
+                        if (actualHeaderCRC != originalHeaderCRC) {
+                            System.err.println("Had a corrupt entry header in " + m_path + " at position " + startPosition);
                             continue;
                         }
 
                         if (valueSize == -1) {
                             //Tombstone
+                            newEntry = new CaskEntry(
+                                    MiniCask.this,
+                                    timestamp,
+                                    flags,
+                                    keyBytes,
+                                    -1,
+                                    -1,
+                                    null,
+                                    null);
+                            break;
+                        }
+
+                        final byte valueBytes[] = new byte[actualValueSize];
+                        final int valuePosition = view.position();
+                        final int originalValueCRC = view.getInt();
+                        view.get(valueBytes);
+                        crc.reset();
+                        crc.update(valueBytes);
+                        final int actualValueCRC = (int)crc.getValue();
+                        if (actualValueCRC != originalValueCRC) {
+                            System.err.println("Had a corrupt entry value in " + m_path + " at position " + startPosition);
                             continue;
                         }
 
@@ -442,16 +444,66 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
     }
 
     @Override
-    public void open() throws IOException {
-        m_outCask = new MiniCask(new File(m_caskPath, m_nextMiniCaskIndex + ".bitcask"), m_nextMiniCaskIndex);
-        m_writeThread.execute(new Runnable() {
-            @Override
-            public void run() {
-                m_outCask.m_lock.readLock().lock();
-            }
-        });
+    public synchronized void open() throws IOException {
+        if (m_readThreads.isShutdown()) {
+            throw new IOException("Can't reuse a closed JitCask");
+        }
+        reloadJitCask();
+        m_outCask = new MiniCask(new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"), m_nextMiniCaskIndex);
         m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);
         m_nextMiniCaskIndex++;
+    }
+
+    private void reloadJitCask() throws IOException {
+        for (File f : m_caskPath.listFiles()) {
+            if (!f.getName().endsWith(".minicask")) {
+                throw new IOException("Unrecognized file " + f + " found in cask directory");
+            }
+            int caskIndex = Integer.valueOf(f.getName().substring(0, f.getName().length() - 9));
+            MiniCask cask = new MiniCask(f, caskIndex);
+            m_miniCasks.put(caskIndex, cask);
+        }
+
+        TreeMap<byte[], byte[]> keyDir = m_keyDir.leakKeyDir();
+        for (CaskEntry ce : this) {
+            byte entryBytes[] = keyDir.get(ce.key);
+            if (entryBytes == null) {
+                keyDir.put(
+                        ce.key,
+                        KDEntry.toBytes(
+                                ce.miniCask.m_fileId,
+                                ce.valueLength,
+                                ce.valuePosition,
+                                ce.timestamp,
+                                ce.flags));
+                continue;
+            }
+
+            KDEntry existingEntry = new KDEntry(entryBytes);
+            if (existingEntry.timestamp < ce.timestamp) {
+                keyDir.put(
+                        ce.key,
+                        KDEntry.toBytes(
+                                ce.miniCask.m_fileId,
+                                ce.valueLength,
+                                ce.valuePosition,
+                                ce.timestamp,
+                                ce.flags));
+            }
+        }
+
+        /*
+         * Remove all the tombstones from memory because the merge thread might have moved stuff out of order?
+         * Really want to see if I can make merging not change the order of stuff
+         */
+        Iterator<Map.Entry<byte[], byte[]>> iter = keyDir.entrySet().iterator();
+        while (iter.hasNext()) {
+            Map.Entry<byte[], byte[]> entry = iter.next();
+            KDEntry kdEntry = new KDEntry(entry.getValue());
+            if (kdEntry.valuePos == -1) {
+                iter.remove();
+            }
+        }
     }
 
     @Override
@@ -475,12 +527,7 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
                         continue;
                     }
 
-                    mc.m_lock.readLock().lock();
-                    try {
-                        return mc.getValue(entry.valuePos, entry.valueSize, key.length);
-                    } finally {
-                        mc.m_lock.readLock().unlock();
-                    }
+                    return mc.getValue(entry.valuePos, entry.valueSize, entry.flags == 1);
                 }
             }
         });
@@ -525,7 +572,12 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
         ListenableFuture<?> result = m_writeThread.submit(new Callable<Object>() {
             @Override
             public Object call() throws Exception {
-                putImpl(key, compressedValue.get(), compressValue);
+                byte compressionResult[] = compressedValue.get();
+                if (compressionResult.length >= value.length) {
+                    putImpl(key, value, false);
+                } else {
+                    putImpl(key, compressedValue.get(), compressValue);
+                }
                 return null;
             }
         });
@@ -544,12 +596,9 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
     private void putImpl(byte key[], byte value[], boolean compressedValue) throws IOException {
         final long timestamp = getNextTimestamp();
         if (!m_outCask.addEntry(timestamp, key, value, compressedValue, m_keyDir)) {
-            m_outCask.m_lock.readLock().unlock();
-            assert(m_outCask.m_lock.getReadHoldCount() == 0);
-            m_outCask = new MiniCask(new File(m_caskPath, m_nextMiniCaskIndex + ".bitcask"), m_nextMiniCaskIndex);
+            m_outCask = new MiniCask(new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"), m_nextMiniCaskIndex);
             m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);
             m_nextMiniCaskIndex++;
-            m_outCask.m_lock.readLock().lock();
             if (!m_outCask.addEntry(timestamp, key, value, compressedValue, m_keyDir)) {
                 throw new IOException("Unable to place value in an empty bitcask, should never happen");
             }
@@ -645,15 +694,52 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
     }
 
     @Override
-    public ListenableFuture<byte[]> getAndRemove(byte[] key) {
-        // TODO Auto-generated method stub
-        return null;
-    }
+    public synchronized void close() throws IOException {
+        m_readThreads.shutdown();
+        m_writeThread.shutdown();
+        try {
+            m_readThreads.awaitTermination(365, TimeUnit.DAYS);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        try {
+            m_writeThread.awaitTermination(365, TimeUnit.DAYS);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
 
-    @Override
-    public void close() throws IOException {
-        // TODO Auto-generated method stub
-
+        try {
+            for (MiniCask mc : m_miniCasks.values()) {
+                try {
+                    if (mc.m_outChannel.isOpen()) {
+                        try {
+                            mc.m_outChannel.force(false);
+                        } finally {
+                            try {
+                                mc.m_buffer.force();
+                            } finally {
+                                try {
+                                    mc.m_outChannel.truncate(mc.m_buffer.position());
+                                } finally {
+                                    mc.m_outChannel.close();
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        } finally {
+            m_miniCasks.clear();
+            /*
+             * Would really love those stupid fucking buffers to get unmapped
+             * you ivory tower jackasses
+             */
+            for (int ii = 0; ii < 10; ii++) {
+                System.gc();
+            }
+        }
     }
 
     @Override
@@ -663,18 +749,9 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
     }
 
     public Iterator<CaskEntry> iterator() {
-        Map<Integer, MiniCask> casks = m_miniCasks.get();
-        final Set<MiniCask> casksToRead = new HashSet<MiniCask>();
-        for (MiniCask cask : casks.values()) {
-            cask.m_lock.readLock().lock();
-            if (!cask.m_outChannel.isOpen()) {
-                cask.m_lock.readLock().unlock();
-                continue;
-            }
-            casksToRead.add(cask);
-        }
+        final Map<Integer, MiniCask> casks = m_miniCasks.get();
 
-        if (casksToRead.isEmpty()) {
+        if (casks.isEmpty()) {
             return new Iterator<CaskEntry>() {
 
                 @Override
@@ -697,7 +774,7 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
 
         return new Iterator<CaskEntry>() {
 
-            Iterator<MiniCask> caskIterator = casksToRead.iterator();
+            Iterator<MiniCask> caskIterator = casks.values().iterator();
             MiniCask currentCask = caskIterator.next();
             Iterator<CaskEntry> entryIterator = currentCask.iterator();
 
@@ -707,7 +784,6 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
                     return false;
                 }
                 while (!entryIterator.hasNext()) {
-                    currentCask.m_lock.readLock().unlock();
                     if (caskIterator.hasNext()) {
                         currentCask = caskIterator.next();
                         entryIterator = currentCask.iterator();

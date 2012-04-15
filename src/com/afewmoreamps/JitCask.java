@@ -27,7 +27,6 @@ public interface JitCask {
     public ListenableFuture<?> put(byte key[], byte value[], boolean compressValue);
 
     public ListenableFuture<?> remove(byte key[]);
-    public ListenableFuture<byte[]> getAndRemove(byte key[]);
 
     public void close() throws IOException;
 
