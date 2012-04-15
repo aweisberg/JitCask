@@ -455,14 +455,17 @@ class JitCaskImpl implements JitCask, Iterable<JitCaskImpl.CaskEntry> {
     }
 
     private void reloadJitCask() throws IOException {
+        int highestIndex = -1;
         for (File f : m_caskPath.listFiles()) {
             if (!f.getName().endsWith(".minicask")) {
                 throw new IOException("Unrecognized file " + f + " found in cask directory");
             }
             int caskIndex = Integer.valueOf(f.getName().substring(0, f.getName().length() - 9));
+            highestIndex = Math.max(caskIndex, highestIndex);
             MiniCask cask = new MiniCask(f, caskIndex);
             m_miniCasks.put(caskIndex, cask);
         }
+        m_nextMiniCaskIndex = highestIndex + 1;
 
         TreeMap<byte[], byte[]> keyDir = m_keyDir.leakKeyDir();
         for (CaskEntry ce : this) {
