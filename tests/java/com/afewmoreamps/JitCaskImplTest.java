@@ -162,7 +162,7 @@ public class JitCaskImplTest {
             ByteBuffer keyBuffer = ByteBuffer.allocate(keySize);
             keyBuffer.putInt(r.nextInt(20000000));
             byte key[] = keyBuffer.array();
-            assertNotNull(jc.get(key).get());
+            assertNotNull(jc.get(key));
             keysRetrieved++;
             if (keysRetrieved % 100000 == 0) {
                 System.out.println("Retrieved " + keysRetrieved + " in " + ((System.currentTimeMillis() - start) / 1000));
