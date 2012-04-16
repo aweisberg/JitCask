@@ -154,7 +154,7 @@ public class JitCaskImplTest {
             byte value[] = entropy.get(valueSize);
             jc.put(key, value);
         }
-        System.out.println("Loaded 1 million keys in " + ((System.currentTimeMillis() - start) / 1000));
+        System.out.println("Loaded 20 million keys in " + ((System.currentTimeMillis() - start) / 1000));
 
         int keysRetrieved = 0;
         start = System.currentTimeMillis();
@@ -168,6 +168,18 @@ public class JitCaskImplTest {
                 System.out.println("Retrieved " + keysRetrieved + " in " + ((System.currentTimeMillis() - start) / 1000));
             }
         }
+
+//        long start = System.currentTimeMillis();
+//        int keyIndex = 0;
+//        while (true) {
+//            ByteBuffer keyBuffer = ByteBuffer.allocate(keySize);
+//            keyBuffer.putInt(keyIndex++);
+//            byte key[] = keyBuffer.array();
+//            jc.put(key, new byte[0]);
+//            if (keyIndex % 1000000 == 0) {
+//                System.out.println("Inserted " + (keyIndex / 1000000) + " million 64 byte keys in " + ((System.currentTimeMillis() - start) / 1000) + " seconds");
+//            }
+//        }
     }
 
 }

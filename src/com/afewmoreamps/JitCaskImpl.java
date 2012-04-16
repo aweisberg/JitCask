@@ -49,6 +49,8 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
     private final boolean m_compressByDefault;
 
+    private static final int READ_QUEUE_DEPTH = 64;
+    private final Semaphore m_maxOutstandingReads = new Semaphore(READ_QUEUE_DEPTH);
     private final Semaphore m_maxOutstandingWrites = new Semaphore(64);
 
     public JitCaskImpl(File caskPath, boolean compressByDefault) throws IOException {
@@ -105,13 +107,13 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         };
         m_readThreads = MoreExecutors.listeningDecorator(
                 new ThreadPoolExecutor(
-                        32,
-                        32,
+                        READ_QUEUE_DEPTH,
+                        READ_QUEUE_DEPTH,
                         0,
                         TimeUnit.MILLISECONDS,
-                        new LinkedBlockingQueue<Runnable>(128),
+                        new LinkedBlockingQueue<Runnable>(),
                         tf,
-                        new ThreadPoolExecutor.CallerRunsPolicy()));
+                        new ThreadPoolExecutor.AbortPolicy()));
 
         tf = new ThreadFactory() {
             private final AtomicInteger m_counter = new AtomicInteger();
@@ -209,26 +211,35 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
     @Override
     public ListenableFuture<byte[]> get(final byte[] key) {
+        try {
+            m_maxOutstandingReads.acquire();
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
         return m_readThreads.submit(new Callable<byte[]>() {
             @Override
             public byte[] call() throws Exception {
-                while (true) {
-                    KDEntry entry = m_keyDir.get(key);
-                    if (entry == null) {
-                        return null;
-                    }
+                try {
+                    while (true) {
+                        KDEntry entry = m_keyDir.get(key);
+                        if (entry == null) {
+                            return null;
+                        }
 
-                    final MiniCask mc = m_miniCasks.get(entry.fileId);
-                    /*
-                     * Race condition, file was deleted after looking up entry.
-                     * Loop again and find out the state of the key from the KeyDir
-                     * again.
-                     */
-                    if (mc == null) {
-                        continue;
-                    }
+                        final MiniCask mc = m_miniCasks.get(entry.fileId);
+                        /*
+                         * Race condition, file was deleted after looking up entry.
+                         * Loop again and find out the state of the key from the KeyDir
+                         * again.
+                         */
+                        if (mc == null) {
+                            continue;
+                        }
 
-                    return mc.getValue(entry.valuePos, entry.valueSize, entry.flags == 1);
+                        return mc.getValue(entry.valuePos, entry.valueSize, entry.flags == 1);
+                    }
+                } finally {
+                    m_maxOutstandingReads.release();
                 }
             }
         });
