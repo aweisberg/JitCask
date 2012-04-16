@@ -26,6 +26,8 @@ import java.util.TreeSet;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
+import com.yahoo.ycsb.generator.ZipfianGenerator;
+
 import org.junit.Before;
 import org.junit.Test;
 
@@ -156,11 +158,24 @@ public class JitCaskImplTest {
         }
         System.out.println("Loaded 20 million keys in " + ((System.currentTimeMillis() - start) / 1000));
 
+        /*
+         * zetans
+         * .999999 - 23.603331618973705
+         * .99999 - 23.605717019208985
+         * .9999 - 23.62958916236007
+         * .999 - 23.870135124976315
+         * .99 - 26.46902820178302
+         * .95 - 43.81911600654099
+         * .90 - 90.56988598108148
+         * .8 - 495.5624615889921
+         * .5 - 199998.53965056606
+         */
         int keysRetrieved = 0;
         start = System.currentTimeMillis();
+        ZipfianGenerator zipf = new ZipfianGenerator( 0, 20000000, .99, 26.46902820178302);
         while (true) {
             ByteBuffer keyBuffer = ByteBuffer.allocate(keySize);
-            keyBuffer.putInt(r.nextInt(20000000));
+            keyBuffer.putInt(zipf.nextInt());
             byte key[] = keyBuffer.array();
             assertNotNull(jc.get(key));
             keysRetrieved++;
