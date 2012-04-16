@@ -18,7 +18,6 @@ import java.io.IOException;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
-import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
@@ -28,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.CRC32;
 
+import com.afewmoreamps.KeyDir.SubKeyDir;
 import com.afewmoreamps.util.COWMap;
 import com.google.common.util.concurrent.*;
 
@@ -39,7 +39,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     private final ListeningExecutorService m_compressionThreads;
     private final ListeningExecutorService m_readThreads;
 
-    private final KeyDir m_keyDir = new KeyDir();
+    private final KeyDir m_keyDir = new KeyDir(READ_QUEUE_DEPTH);
 
     private final COWMap<Integer, MiniCask> m_miniCasks = new COWMap<Integer, MiniCask>();
 
@@ -138,7 +138,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                                 availableProcs,
                                 0,
                                 TimeUnit.MILLISECONDS,
-                                new LinkedBlockingQueue<Runnable>(availableProcs * 2),
+                                new LinkedBlockingQueue<Runnable>(availableProcs),
                                 tf,
                                 new ThreadPoolExecutor.CallerRunsPolicy()));
     }
@@ -167,11 +167,11 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         }
         m_nextMiniCaskIndex = highestIndex + 1;
 
-        TreeMap<byte[], byte[]> keyDir = m_keyDir.leakKeyDir();
         for (CaskEntry ce : this) {
-            byte entryBytes[] = keyDir.get(ce.key);
+            final SubKeyDir subKeyDir = m_keyDir.getSubKeyDir(ce.key);
+            byte entryBytes[] = subKeyDir.m_keys.get(ce.key);
             if (entryBytes == null) {
-                keyDir.put(
+                subKeyDir.m_keys.put(
                         ce.key,
                         KDEntry.toBytes(
                                 ce.miniCask.m_fileId,
@@ -184,7 +184,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
             KDEntry existingEntry = new KDEntry(entryBytes);
             if (existingEntry.timestamp < ce.timestamp) {
-                keyDir.put(
+                subKeyDir.m_keys.put(
                         ce.key,
                         KDEntry.toBytes(
                                 ce.miniCask.m_fileId,
@@ -199,12 +199,14 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
          * Remove all the tombstones from memory because the merge thread might have moved stuff out of order?
          * Really want to see if I can make merging not change the order of stuff
          */
-        Iterator<Map.Entry<byte[], byte[]>> iter = keyDir.entrySet().iterator();
-        while (iter.hasNext()) {
-            Map.Entry<byte[], byte[]> entry = iter.next();
-            KDEntry kdEntry = new KDEntry(entry.getValue());
-            if (kdEntry.valuePos == -1) {
-                iter.remove();
+        for (SubKeyDir subKeyDir : m_keyDir.m_subKeyDirs.values()) {
+            Iterator<Map.Entry<byte[], byte[]>> iter = subKeyDir.m_keys.entrySet().iterator();
+            while (iter.hasNext()) {
+                Map.Entry<byte[], byte[]> entry = iter.next();
+                KDEntry kdEntry = new KDEntry(entry.getValue());
+                if (kdEntry.valuePos == -1) {
+                    iter.remove();
+                }
             }
         }
     }

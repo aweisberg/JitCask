@@ -165,7 +165,11 @@ public class JitCaskImplTest {
             assertNotNull(jc.get(key));
             keysRetrieved++;
             if (keysRetrieved % 100000 == 0) {
-                System.out.println("Retrieved " + keysRetrieved + " in " + ((System.currentTimeMillis() - start) / 1000));
+                System.out.println("Retrieved " + keysRetrieved + " in " + ((System.currentTimeMillis() - start) / 1000.0));
+            }
+            if (keysRetrieved % 1000000 == 0) {
+                keysRetrieved = 0;
+                start = System.currentTimeMillis();
             }
         }
 

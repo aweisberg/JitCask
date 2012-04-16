@@ -13,33 +13,66 @@
 //limitations under the License.
 package com.afewmoreamps;
 
+import java.util.HashMap;
 import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import sun.security.util.ByteArrayLexOrder;
 
 
-public class KeyDir {
-    final ReentrantReadWriteLock m_lock = new ReentrantReadWriteLock(true);
-    private final TreeMap<byte[], byte[]> m_keys =
-            new TreeMap<byte[], byte[]>(new ByteArrayLexOrder());
+class KeyDir {
+
+    static class SubKeyDir {
+        private final ReentrantReadWriteLock m_lock = new ReentrantReadWriteLock(true);
+        final TreeMap<byte[], byte[]> m_keys =
+                new TreeMap<byte[], byte[]>(new ByteArrayLexOrder());
+    }
+
+    final HashMap<Integer, SubKeyDir> m_subKeyDirs = new HashMap<Integer, SubKeyDir>();
+    private final int m_numPartitions;
+
+    KeyDir(int partitions) {
+        if (partitions < 1) {
+            throw new IllegalArgumentException();
+        }
+        m_numPartitions = partitions;
+        for (int ii = 0; ii < partitions; ii++) {
+            m_subKeyDirs.put(ii, new SubKeyDir());
+        }
+    }
+
+    private int hashByteArray(byte key[]) {
+        int hash = 1;
+        for (int ii = key.length - 1; ii >= 0; ii--)
+            hash = 31 * hash + (int)key[ii];
+        return hash;
+    }
+
+    /*
+     * Leaked to avoid locking for reload
+     */
+    SubKeyDir getSubKeyDir(byte key[]) {
+        return m_subKeyDirs.get(Math.abs(hashByteArray(key)) % m_numPartitions);
+    }
 
     /*
      * Does identity for expected.
      * Returns null on success and the unexpected value on failure
      */
-    public KDEntry compareAndSet(byte key[], byte expected[], byte update[]) {
-        assert(m_lock.getWriteHoldCount() == 0);
-        m_lock.writeLock().lock();
+    KDEntry compareAndSet(byte key[], byte expected[], byte update[]) {
+        final SubKeyDir subKeyDir = getSubKeyDir(key);
+        assert(subKeyDir.m_lock.getWriteHoldCount() == 0);
+
+        subKeyDir.m_lock.writeLock().lock();
         byte found[] = null;
         try {
-            found = m_keys.get(key);
+            found = subKeyDir.m_keys.get(key);
             if (found == expected) {
-                m_keys.put(key, update);
+                subKeyDir.m_keys.put(key, update);
                 return null;
             }
         } finally {
-            m_lock.writeLock().unlock();
+            subKeyDir.m_lock.writeLock().unlock();
         }
 
         if (found == null) {
@@ -91,47 +124,42 @@ public class KeyDir {
 //        return new KDEntry(found);
 //    }
 
-    public KDEntry get(byte key[]) {
-        assert(m_lock.getReadHoldCount() == 0);
-        m_lock.readLock().lock();
+    KDEntry get(byte key[]) {
+        final SubKeyDir subKeyDir = getSubKeyDir(key);
+        assert(subKeyDir.m_lock.getReadHoldCount() == 0);
+        subKeyDir.m_lock.readLock().lock();
         try {
-            byte entry[] = m_keys.get(key);
+            byte entry[] = subKeyDir.m_keys.get(key);
             if (entry != null) {
                 return new KDEntry(entry);
             } else {
                 return null;
             }
         } finally {
-            m_lock.readLock().unlock();
+            subKeyDir.m_lock.readLock().unlock();
         }
     }
 
-    public void remove(byte key[]) {
-        assert(m_lock.getWriteHoldCount() == 0);
-        m_lock.writeLock().lock();
+    void remove(byte key[]) {
+        final SubKeyDir subKeyDir = getSubKeyDir(key);
+        assert(subKeyDir.m_lock.getWriteHoldCount() == 0);
+        subKeyDir.m_lock.writeLock().lock();
         try {
-            m_keys.remove(key);
+            subKeyDir.m_keys.remove(key);
         } finally {
-            m_lock.writeLock().unlock();
+            subKeyDir.m_lock.writeLock().unlock();
         }
     }
 
-    public void put(byte key[], byte value[]) {
-        assert(m_lock.getWriteHoldCount() == 0);
-        m_lock.writeLock().lock();
+    void put(byte key[], byte value[]) {
+        final SubKeyDir subKeyDir = getSubKeyDir(key);
+        assert(subKeyDir.m_lock.getWriteHoldCount() == 0);
+        subKeyDir.m_lock.writeLock().lock();
         try {
-            m_keys.put(key, value);
+            subKeyDir.m_keys.put(key, value);
         } finally {
-            m_lock.writeLock().unlock();
+            subKeyDir.m_lock.writeLock().unlock();
         }
     }
 
-    /**
-     * Leak the keydir at startup to bypass locking
-     * since it is single threaded
-     * @return
-     */
-    public TreeMap<byte[], byte[]> leakKeyDir() {
-        return m_keys;
-    }
 }
