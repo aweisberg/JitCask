@@ -24,14 +24,9 @@ public interface JitCask {
     public ListenableFuture<byte[]> get(byte key[]);
 
     public ListenableFuture<?> put(byte key[], byte value[]);
-    public ListenableFuture<?> put(byte key[], byte value[], boolean compressValue);
+    public ListenableFuture<?> put(byte key[], byte value[], int flags);
 
     public ListenableFuture<?> remove(byte key[]);
 
     public void close() throws IOException;
-
-    /*
-     * Make all writes submitted prior to invocation of sync durable
-     */
-    public void sync() throws IOException;
 }

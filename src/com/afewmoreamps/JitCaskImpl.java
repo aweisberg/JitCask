@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.concurrent.Callable;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -33,11 +34,38 @@ import com.google.common.util.concurrent.*;
 
 class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
+    public static class CaskConfig {
+        private final File caskPath;
+        public int syncInterval = 15;
+        public boolean compressByDefault = true;
+
+        public CaskConfig(File caskPath) {
+            this.path = path;
+        }
+    }
+
+    /**
+     * If this flag is set the value supplied put will be compressed for storage
+     */
+    public static final int PUTFLAG_COMPRESS = 1;
+
+    /**
+     * If this flag is set then put will not return until
+     * the data is fsynced
+     */
+    public static final int PUTFLAG_SYNC = 1 << 1;
+
+    /**
+     * Constant with the recommended default of compress and sync
+     */
+    public static final int PUTFLAG_COMPRESS_AND_SYNC = PUTFLAG_COMPRESS | PUTFLAG_SYNC;
+
     private final File m_caskPath;
 
     private final ListeningExecutorService m_writeThread;
     private final ListeningExecutorService m_compressionThreads;
     private final ListeningExecutorService m_readThreads;
+    private final ListeningScheduledExecutorService m_syncThread;
 
     private final KeyDir m_keyDir = new KeyDir(READ_QUEUE_DEPTH);
 
@@ -48,29 +76,33 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     private int m_nextMiniCaskIndex = 0;
 
     private final boolean m_compressByDefault;
+    private final int m_syncInterval;
 
     private static final int READ_QUEUE_DEPTH = 64;
     private final Semaphore m_maxOutstandingReads = new Semaphore(READ_QUEUE_DEPTH);
     private final Semaphore m_maxOutstandingWrites = new Semaphore(64);
 
-    public JitCaskImpl(File caskPath, boolean compressByDefault) throws IOException {
-        m_caskPath = caskPath;
-        m_compressByDefault = compressByDefault;
-        if (!caskPath.exists()) {
-            throw new IOException("Path " + caskPath + " does not exist");
+    public JitCaskImpl(CaskConfig config) throws IOException {
+        m_syncInterval = config.syncInterval;
+        m_caskPath = config.caskPath;
+        m_compressByDefault = config.compressByDefault;
+
+        if (!m_caskPath.exists()) {
+            throw new IOException("Path " + m_caskPath + " does not exist");
         }
-        if (!caskPath.isDirectory()) {
-            throw new IOException("Path " + caskPath + " exists but is not a directory");
+        if (!m_caskPath.isDirectory()) {
+            throw new IOException("Path " + m_caskPath + " exists but is not a directory");
         }
-        if (!caskPath.canRead()) {
-            throw new IOException("Path " + caskPath + " is not readable");
+        if (!m_caskPath.canRead()) {
+            throw new IOException("Path " + m_caskPath + " is not readable");
         }
-        if (!caskPath.canWrite()) {
-            throw new IOException("Path " + caskPath + " is not writable");
+        if (!m_caskPath.canWrite()) {
+            throw new IOException("Path " + m_caskPath + " is not writable");
         }
-        if (!caskPath.canExecute()) {
-            throw new IOException("Path " + caskPath + " is not executable");
+        if (!m_caskPath.canExecute()) {
+            throw new IOException("Path " + m_caskPath + " is not executable");
         }
+
         ThreadFactory tf = new ThreadFactory() {
 
             @Override
@@ -87,8 +119,23 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                         1,
                         0,
                         TimeUnit.MILLISECONDS,
-                        new LinkedBlockingQueue<Runnable>(96),
+                        new LinkedBlockingQueue<Runnable>(),
                         tf));
+
+        tf = new ThreadFactory() {
+
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread( r, "JitCask[" + m_caskPath + "] Sync Thread");
+                t.setDaemon(true);
+                return t;
+            }
+
+        };
+        m_syncThread = MoreExecutors.listeningDecorator(
+                new ScheduledThreadPoolExecutor(
+                1,
+                tf));
 
         tf = new ThreadFactory() {
             private final AtomicInteger m_counter = new AtomicInteger();
@@ -130,6 +177,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             }
 
         };
+
         final int availableProcs = Runtime.getRuntime().availableProcessors() / 2;
         m_compressionThreads =
                 MoreExecutors.listeningDecorator(
@@ -152,6 +200,29 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         m_outCask = new MiniCask(new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"), m_nextMiniCaskIndex);
         m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);
         m_nextMiniCaskIndex++;
+
+        m_syncThread.scheduleAtFixedRate(new Runnable() {
+            @Override
+            public void run() {
+                /*
+                 * Catch throwable since we don't ever want to stop syncing.
+                 */
+                try {
+                    final long  start = System.currentTimeMillis();
+                    sync();
+                    final long delta = System.currentTimeMillis() - start;
+                    if (delta > m_syncInterval) {
+                        System.err.println("Missed sync interval by " + delta);
+                    }
+                } catch (Throwable t) {
+                    t.printStackTrace();
+                }
+            }
+        }, 0, m_syncInterval, TimeUnit.MILLISECONDS);
+    }
+
+    private void sync() {
+
     }
 
     private void reloadJitCask() throws IOException {
@@ -456,11 +527,6 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     }
 
     @Override
-    public void sync() throws IOException {
-        // TODO Auto-generated method stub
-
-    }
-
     public Iterator<CaskEntry> iterator() {
         final Map<Integer, MiniCask> casks = m_miniCasks.get();
 
