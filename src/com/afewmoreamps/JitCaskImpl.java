@@ -19,6 +19,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.Semaphore;
@@ -36,11 +37,12 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
     public static class CaskConfig {
         private final File caskPath;
-        public int syncInterval = 15;
+        public int syncInterval = 100;
         public boolean compressByDefault = true;
+        public boolean syncByDefault = true;
 
         public CaskConfig(File caskPath) {
-            this.path = path;
+            this.caskPath = caskPath;
         }
     }
 
@@ -76,13 +78,17 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     private int m_nextMiniCaskIndex = 0;
 
     private final boolean m_compressByDefault;
+    private final boolean m_syncByDefault;
     private final int m_syncInterval;
 
     private static final int READ_QUEUE_DEPTH = 64;
     private final Semaphore m_maxOutstandingReads = new Semaphore(READ_QUEUE_DEPTH);
     private final Semaphore m_maxOutstandingWrites = new Semaphore(64);
+    private final ConcurrentLinkedQueue<MiniCask> m_finishedCasksPendingSync =
+        new ConcurrentLinkedQueue<MiniCask>();
 
     public JitCaskImpl(CaskConfig config) throws IOException {
+        m_syncByDefault = config.syncByDefault;
         m_syncInterval = config.syncInterval;
         m_caskPath = config.caskPath;
         m_compressByDefault = config.compressByDefault;
@@ -221,8 +227,12 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         }, 0, m_syncInterval, TimeUnit.MILLISECONDS);
     }
 
-    private void sync() {
-
+    private void sync() throws IOException {
+        MiniCask cask;
+        while ((cask = m_finishedCasksPendingSync.poll()) != null) {
+            cask.sync();
+        }
+        m_outCask.sync();
     }
 
     private void reloadJitCask() throws IOException {
@@ -320,12 +330,17 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
     @Override
     public ListenableFuture<?> put(byte[] key, byte[] value) {
-        return put (key, value, m_compressByDefault);
+        return put(
+                key,
+                value,
+                (m_compressByDefault ? PUTFLAG_COMPRESS : 0) | (m_syncByDefault ? PUTFLAG_SYNC : 0));
     }
 
     @Override
     public ListenableFuture<?> put(final byte[] key, final byte[] value,
-            final boolean compressValue) {
+            int flags) {
+        final boolean compressValue = (flags & PUTFLAG_COMPRESS) != 0;
+        final boolean waitForSync = (flags & PUTFLAG_SYNC) != 0;
         if (value == null) {
             throw new IllegalArgumentException("Value cannot be null");
         }

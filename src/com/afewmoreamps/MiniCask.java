@@ -153,6 +153,7 @@ class MiniCask implements Iterable<CaskEntry> {
         return valueBytes;
     }
 
+    @Override
     public Iterator<CaskEntry> iterator() {
         final ByteBuffer view = m_buffer.asReadOnlyBuffer();
         view.position(0);
@@ -295,6 +296,18 @@ class MiniCask implements Iterable<CaskEntry> {
                 }
             }
         }
+    }
+
+    public void sync() throws IOException {
+        /*
+         * *Cough*
+         * So msync updates metadata? I think, maybe? God forbid people actually doc this stuff
+         * Force isn't guaranteed to take care of modifications to the page cache
+         * through the MappedByteBuffer, but my research says that on Linux it is.
+         *
+         * I wouldn't rely on this without doing a few power plug a crash safety tests
+         */
+        m_outChannel.force(false);
     }
 
 }
