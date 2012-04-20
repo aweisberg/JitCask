@@ -13,21 +13,17 @@
 //limitations under the License.
 package com.afewmoreamps;
 
-import java.io.IOException;
-import com.google.common.util.concurrent.*;
+/*
+ * Remove is technically a put since it is putting a tombstone
+ */
+public class PutResult extends OpResult {
 
-public interface JitCask {
+    public final int uncompressedSize;
+    public final int compressedSize;
 
-    public void open() throws IOException;
-
-    public ListenableFuture<GetResult> get(byte key[]);
-    public ListenableFuture<GetResult> get(byte key[], int flags);
-
-    public ListenableFuture<PutResult> put(byte key[], byte value[]);
-    public ListenableFuture<PutResult> put(byte key[], byte value[], int flags);
-
-    public ListenableFuture<RemoveResult> remove(byte key[]);
-    public ListenableFuture<RemoveResult> remove(byte key[], int flags);
-
-    public void close() throws IOException;
+    PutResult(int uncompressedSize, int compressedSize, int latency) {
+        super(latency);
+        this.uncompressedSize = uncompressedSize;
+        this.compressedSize = compressedSize;
+    }
 }

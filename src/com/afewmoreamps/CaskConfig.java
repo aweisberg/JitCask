@@ -13,21 +13,15 @@
 //limitations under the License.
 package com.afewmoreamps;
 
-import java.io.IOException;
-import com.google.common.util.concurrent.*;
+import java.io.File;
 
-public interface JitCask {
+public class CaskConfig {
+    final File caskPath;
+    public int syncInterval = 100;
+    public boolean compressByDefault = true;
+    public boolean syncByDefault = true;
 
-    public void open() throws IOException;
-
-    public ListenableFuture<GetResult> get(byte key[]);
-    public ListenableFuture<GetResult> get(byte key[], int flags);
-
-    public ListenableFuture<PutResult> put(byte key[], byte value[]);
-    public ListenableFuture<PutResult> put(byte key[], byte value[], int flags);
-
-    public ListenableFuture<RemoveResult> remove(byte key[]);
-    public ListenableFuture<RemoveResult> remove(byte key[], int flags);
-
-    public void close() throws IOException;
+    public CaskConfig(File caskPath) {
+        this.caskPath = caskPath;
+    }
 }

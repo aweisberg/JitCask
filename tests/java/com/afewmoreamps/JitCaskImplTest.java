@@ -48,7 +48,10 @@ public class JitCaskImplTest {
 
     @Test
     public void testPut() throws Exception {
-        JitCaskImpl jc = new JitCaskImpl(tempPath, true);
+        CaskConfig config = new CaskConfig(tempPath);
+        config.syncByDefault = false;
+        config.syncInterval = 5000;
+        JitCaskImpl jc = new JitCaskImpl(config);
 
         jc.open();
 
@@ -94,7 +97,7 @@ public class JitCaskImplTest {
         for (int ii = 0; ii < keyCount; ii++) {
             byte expectedKey[] = keys.get(zz);
             byte expectedValue[] = values.get(zz++);
-            assertTrue(Arrays.equals(expectedValue, jc.get(expectedKey).get()));
+            assertTrue(Arrays.equals(expectedValue, jc.get(expectedKey).get().value()));
         }
 
         results.clear();
@@ -116,14 +119,14 @@ public class JitCaskImplTest {
             byte expectedKey[] = keys.get(zz);
             byte expectedValue[] = values.get(zz++);
             if (ii % 2 == 0) {
-                assertTrue(Arrays.equals(expectedValue, jc.get(expectedKey).get()));
+                assertTrue(Arrays.equals(expectedValue, jc.get(expectedKey).get().value()));
             } else {
                 assertNull(jc.get(expectedKey).get());
             }
         }
 
         jc.close();
-        jc = new JitCaskImpl(tempPath, true);
+        jc = new JitCaskImpl(config);
         jc.open();
 
         zz = 0;
@@ -132,7 +135,7 @@ public class JitCaskImplTest {
             byte expectedValue[] = values.get(zz++);
             if (ii % 2 == 0) {
                 try {
-                    byte value[] = jc.get(expectedKey).get();
+                    byte value[] = jc.get(expectedKey).get().value();
                     boolean equals = Arrays.equals(expectedValue, value);
                     if (!equals) {
                         System.out.println(ii);
@@ -141,52 +144,52 @@ public class JitCaskImplTest {
                     System.out.println(ii);
                     throw e;
                 }
-                assertTrue(Arrays.equals(expectedValue, jc.get(expectedKey).get()));
+                assertTrue(Arrays.equals(expectedValue, jc.get(expectedKey).get().value()));
             } else {
                 assertNull(jc.get(expectedKey).get());
             }
         }
 
-        long start = System.currentTimeMillis();
-        int keyIndex = 0;
-        for (; keyIndex < 20000000; keyIndex++) {
-            ByteBuffer keyBuffer = ByteBuffer.allocate(keySize);
-            keyBuffer.putInt(keyIndex);
-            byte key[] = keyBuffer.array();
-            byte value[] = entropy.get(valueSize);
-            jc.put(key, value);
-        }
-        System.out.println("Loaded 20 million keys in " + ((System.currentTimeMillis() - start) / 1000));
-
-        /*
-         * zetans
-         * .999999 - 23.603331618973705
-         * .99999 - 23.605717019208985
-         * .9999 - 23.62958916236007
-         * .999 - 23.870135124976315
-         * .99 - 26.46902820178302
-         * .95 - 43.81911600654099
-         * .90 - 90.56988598108148
-         * .8 - 495.5624615889921
-         * .5 - 199998.53965056606
-         */
-        int keysRetrieved = 0;
-        start = System.currentTimeMillis();
-        ZipfianGenerator zipf = new ZipfianGenerator( 0, 20000000, .99, 26.46902820178302);
-        while (true) {
-            ByteBuffer keyBuffer = ByteBuffer.allocate(keySize);
-            keyBuffer.putInt(zipf.nextInt());
-            byte key[] = keyBuffer.array();
-            assertNotNull(jc.get(key));
-            keysRetrieved++;
-            if (keysRetrieved % 100000 == 0) {
-                System.out.println("Retrieved " + keysRetrieved + " in " + ((System.currentTimeMillis() - start) / 1000.0));
-            }
-            if (keysRetrieved % 1000000 == 0) {
-                keysRetrieved = 0;
-                start = System.currentTimeMillis();
-            }
-        }
+//        long start = System.currentTimeMillis();
+//        int keyIndex = 0;
+//        for (; keyIndex < 20000000; keyIndex++) {
+//            ByteBuffer keyBuffer = ByteBuffer.allocate(keySize);
+//            keyBuffer.putInt(keyIndex);
+//            byte key[] = keyBuffer.array();
+//            byte value[] = entropy.get(valueSize);
+//            jc.put(key, value);
+//        }
+//        System.out.println("Loaded 20 million keys in " + ((System.currentTimeMillis() - start) / 1000));
+//
+//        /*
+//         * zetans
+//         * .999999 - 23.603331618973705
+//         * .99999 - 23.605717019208985
+//         * .9999 - 23.62958916236007
+//         * .999 - 23.870135124976315
+//         * .99 - 26.46902820178302
+//         * .95 - 43.81911600654099
+//         * .90 - 90.56988598108148
+//         * .8 - 495.5624615889921
+//         * .5 - 199998.53965056606
+//         */
+//        int keysRetrieved = 0;
+//        start = System.currentTimeMillis();
+//        ZipfianGenerator zipf = new ZipfianGenerator( 0, 20000000, .99, 26.46902820178302);
+//        while (true) {
+//            ByteBuffer keyBuffer = ByteBuffer.allocate(keySize);
+//            keyBuffer.putInt(zipf.nextInt());
+//            byte key[] = keyBuffer.array();
+//            assertNotNull(jc.get(key));
+//            keysRetrieved++;
+//            if (keysRetrieved % 100000 == 0) {
+//                System.out.println("Retrieved " + keysRetrieved + " in " + ((System.currentTimeMillis() - start) / 1000.0));
+//            }
+//            if (keysRetrieved % 1000000 == 0) {
+//                keysRetrieved = 0;
+//                start = System.currentTimeMillis();
+//            }
+//        }
 
 //        long start = System.currentTimeMillis();
 //        int keyIndex = 0;

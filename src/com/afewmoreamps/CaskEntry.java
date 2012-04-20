@@ -16,7 +16,7 @@ package com.afewmoreamps;
 import java.util.concurrent.FutureTask;
 
 
-public class CaskEntry {
+class CaskEntry {
     final MiniCask miniCask;
     final long timestamp;
     final byte flags;

@@ -13,21 +13,9 @@
 //limitations under the License.
 package com.afewmoreamps;
 
-import java.io.IOException;
-import com.google.common.util.concurrent.*;
+public class RemoveResult extends OpResult {
 
-public interface JitCask {
-
-    public void open() throws IOException;
-
-    public ListenableFuture<GetResult> get(byte key[]);
-    public ListenableFuture<GetResult> get(byte key[], int flags);
-
-    public ListenableFuture<PutResult> put(byte key[], byte value[]);
-    public ListenableFuture<PutResult> put(byte key[], byte value[], int flags);
-
-    public ListenableFuture<RemoveResult> remove(byte key[]);
-    public ListenableFuture<RemoveResult> remove(byte key[], int flags);
-
-    public void close() throws IOException;
+    RemoveResult(int latency) {
+        super(latency);
+    }
 }

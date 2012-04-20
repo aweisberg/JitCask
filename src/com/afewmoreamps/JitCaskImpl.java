@@ -21,6 +21,7 @@ import java.util.NoSuchElementException;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadFactory;
@@ -31,20 +32,15 @@ import java.util.zip.CRC32;
 
 import com.afewmoreamps.KeyDir.SubKeyDir;
 import com.afewmoreamps.util.COWMap;
+import com.afewmoreamps.util.SettableFuture;
 import com.google.common.util.concurrent.*;
 
 class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
-    public static class CaskConfig {
-        private final File caskPath;
-        public int syncInterval = 100;
-        public boolean compressByDefault = true;
-        public boolean syncByDefault = true;
-
-        public CaskConfig(File caskPath) {
-            this.caskPath = caskPath;
-        }
-    }
+    /**
+     * If this flag is set the value returned by get will be
+     */
+    public static final int GETFLAG_UNCOMPRESS = 1;
 
     /**
      * If this flag is set the value supplied put will be compressed for storage
@@ -68,6 +64,9 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     private final ListeningExecutorService m_compressionThreads;
     private final ListeningExecutorService m_readThreads;
     private final ListeningScheduledExecutorService m_syncThread;
+
+    private ScheduledFuture<?> m_syncTaskRunner;
+    private ListenableFutureTask<Long> m_nextSyncTask;
 
     private final KeyDir m_keyDir = new KeyDir(READ_QUEUE_DEPTH);
 
@@ -207,24 +206,41 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);
         m_nextMiniCaskIndex++;
 
-        m_syncThread.scheduleAtFixedRate(new Runnable() {
+        m_syncTaskRunner = m_syncThread.scheduleAtFixedRate(new Runnable() {
             @Override
             public void run() {
-                /*
-                 * Catch throwable since we don't ever want to stop syncing.
-                 */
                 try {
-                    final long  start = System.currentTimeMillis();
-                    sync();
-                    final long delta = System.currentTimeMillis() - start;
-                    if (delta > m_syncInterval) {
-                        System.err.println("Missed sync interval by " + delta);
+                    ListenableFutureTask<Long> currentSyncTask = m_nextSyncTask;
+                    m_nextSyncTask = ListenableFutureTask.create(new Callable<Long>() {
+                        @Override
+                        public Long call() {
+                            /*
+                             * Catch throwable since we don't ever want to stop syncing.
+                             */
+                            try {
+                                final long  start = System.currentTimeMillis();
+                                sync();
+                                final long end = System.currentTimeMillis();
+                                final long delta = System.currentTimeMillis() - start;
+                                if (delta > m_syncInterval) {
+                                    System.err.println("Missed sync interval by " + delta);
+                                }
+                                return end;
+                            } catch (Throwable t) {
+                                t.printStackTrace();
+                                return Long.MIN_VALUE;
+                            }
+                        }
+                    });
+                    if (currentSyncTask != null) {
+                        currentSyncTask.run();
                     }
                 } catch (Throwable t) {
                     t.printStackTrace();
                 }
             }
         }, 0, m_syncInterval, TimeUnit.MILLISECONDS);
+
     }
 
     private void sync() throws IOException {
@@ -293,15 +309,23 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     }
 
     @Override
-    public ListenableFuture<byte[]> get(final byte[] key) {
+    public ListenableFuture<GetResult> get(final byte[] key) {
+        return get(key, 0);
+    }
+
+    @Override
+    public ListenableFuture<GetResult> get(final byte[] key, int flags) {
+        final long start = System.currentTimeMillis();
+        final boolean uncompressValue = (flags & GETFLAG_UNCOMPRESS) != 0 ? true : false;
+
         try {
             m_maxOutstandingReads.acquire();
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
-        return m_readThreads.submit(new Callable<byte[]>() {
+        return m_readThreads.submit(new Callable<GetResult>() {
             @Override
-            public byte[] call() throws Exception {
+            public GetResult call() throws Exception {
                 try {
                     while (true) {
                         KDEntry entry = m_keyDir.get(key);
@@ -318,8 +342,22 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                         if (mc == null) {
                             continue;
                         }
-
-                        return mc.getValue(entry.valuePos, entry.valueSize, entry.flags == 1);
+                        /*
+                         * Potentially compressed and uncompressed value, or just the uncompressed
+                         * value wrapped in a ListenableFutureTask
+                         */
+                        Object values[] = mc.getValue(entry.valuePos, entry.valueSize, entry.flags == 1);
+                        final byte compressedValue[] = (byte[]) values[0];
+                        @SuppressWarnings("unchecked")
+                        final ListenableFutureTask<byte[]> uncompressedValue = (ListenableFutureTask<byte[]>)values[1];
+                        if (uncompressValue) {
+                            uncompressedValue.run();
+                        }
+                        return new GetResult(
+                                key,
+                                compressedValue,
+                                uncompressedValue,
+                                (int)(System.currentTimeMillis() - start));
                     }
                 } finally {
                     m_maxOutstandingReads.release();
@@ -329,7 +367,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     }
 
     @Override
-    public ListenableFuture<?> put(byte[] key, byte[] value) {
+    public ListenableFuture<PutResult> put(byte[] key, byte[] value) {
         return put(
                 key,
                 value,
@@ -337,14 +375,43 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     }
 
     @Override
-    public ListenableFuture<?> put(final byte[] key, final byte[] value,
+    public ListenableFuture<PutResult> put(final byte[] key, final byte[] value,
             int flags) {
-        final boolean compressValue = (flags & PUTFLAG_COMPRESS) != 0;
-        final boolean waitForSync = (flags & PUTFLAG_SYNC) != 0;
-        if (value == null) {
-            throw new IllegalArgumentException("Value cannot be null");
+        if (key == null || value == null) {
+            throw new IllegalArgumentException();
         }
 
+        /*
+         * Record when the put started
+         */
+        final long start = System.currentTimeMillis();
+
+        /*
+         * Parse out the flag for whether an attempt to
+         * should be made to compress the value
+         */
+        final boolean compressValue = (flags & PUTFLAG_COMPRESS) != 0;
+
+        /*
+         * Parse out the flag for whether the future should be set
+         * when the data is synced or whether it should be set
+         * as soon as the data is written to the file descriptor
+         */
+        final boolean waitForSync = (flags & PUTFLAG_SYNC) != 0;
+
+        /*
+         * This is the return value that will be set with the result
+         * or any exceptions thrown during the put
+         */
+        final SettableFuture<PutResult> retval = SettableFuture.create();
+
+        /*
+         * If compression is requested, attempt to compress the value
+         * and generate the CRC in a separate thread pool before submitting
+         * to the single write thread. This allows parallelism for what is potentially
+         * the more CPU intensive part of a write. Can't have more write
+         * threads so best to scale out as far as possible before giving it work.
+         */
         ListenableFuture<Object[]> compressedValueTemp;
         if (compressValue) {
             compressedValueTemp = m_compressionThreads.submit(new Callable<Object[]>() {
@@ -357,6 +424,10 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                     }
             });
         } else {
+            /*
+             * Generate a task in the compression threads to just calculate the CRC
+             * since compression was not requested.
+             */
             compressedValueTemp = ListenableFutureTask.create(new Callable<Object[]>() {
                 @Override
                 public Object[] call() throws Exception {
@@ -367,35 +438,105 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             });
             ((ListenableFutureTask<Object[]>)compressedValueTemp).run();
         }
+        //Final version so it can be bound
         final ListenableFuture<Object[]> compressedValue = compressedValueTemp;
 
+        /*
+         * Limit the maximum number of outstanding writes
+         * to avoid OOM in naive benchmarks/applications
+         */
         try {
             m_maxOutstandingWrites.acquire();
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
-        ListenableFuture<?> result = m_writeThread.submit(new Callable<Object>() {
+
+        /*
+         * Submit the write to the single write thread
+         * which will write the kv pair to the current file and
+         * upsert it into the keydir. If sync was not requested
+         * then the retval future will be set as soon as the write
+         * thread writes the new kv pair to the memory mapped file (page cache).
+         * Otherwise it adds a listener to the next sync task that will set the value
+         * once sync has been performed.
+         */
+        m_writeThread.execute(new Runnable() {
             @Override
-            public Object call() throws Exception {
-                final Object compressionResults[] = compressedValue.get();
+            public void run() {
+                /*
+                 * Retrieve the compression results, forwarding any exceptions
+                 * to the retval future.
+                 */
+                Object compressionResults[];
+                try {
+                    compressionResults = compressedValue.get();
+                } catch (Throwable t) {
+                    retval.setException(t);
+                    return;
+                }
+
                 final byte compressionResult[] = (byte[])compressionResults[0];
                 final int crc = (Integer)compressionResults[1];
 
-                /*
-                 * If compression didn't improve things, don't apply it
-                 */
-                if (compressValue && compressionResult.length >= value.length) {
-                    CRC32 crcCalc = new CRC32();
-                    crcCalc.update(value);
-                    putImpl(key, value, (int)crcCalc.getValue(), false);
-                } else {
-                    putImpl(key, compressionResult, crc, compressValue);
+                try {
+                    /*
+                     * If compression didn't improve things, don't apply it,
+                     * go with the original value.  That means calculating the crc
+                     * of the uncompressed value in the write thread. Might not be the
+                     * right tradeoff since sequential IO is cheap?
+                     */
+                    if (compressValue && compressionResult.length >= value.length) {
+                        CRC32 crcCalc = new CRC32();
+                        crcCalc.update(value);
+                        putImpl(key, value, (int)crcCalc.getValue(), false);
+                    } else {
+                        /*
+                         * Put the possibly compressed or uncompressed value
+                         * in the current cask
+                         */
+                        putImpl(key, compressionResult, crc, compressValue);
+                    }
+                } catch (Throwable t) {
+                    retval.setException(t);
+                    return;
                 }
-                return null;
+
+                /*
+                 * If the put requested waiting for sync then don't set the retval future
+                 * immediately. Add a listener for the next sync task that will do it
+                 * once the data is really durable.
+                 *
+                 * Otherwise set it immediately and use the current time to reflect the latency
+                 * of the put
+                 */
+                if (waitForSync) {
+                    final ListenableFuture<Long> syncTask = m_nextSyncTask;
+                    syncTask.addListener( new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                retval.set(
+                                        new PutResult(
+                                                value.length,
+                                                compressionResult.length,
+                                                (int)(syncTask.get() - start)));
+                            } catch (Throwable t) {
+                                retval.setException(t);
+                                return;
+                            }
+                        }
+                    }, MoreExecutors.sameThreadExecutor());
+                } else {
+                    retval.set(
+                        new PutResult(
+                            value.length,
+                            compressionResult.length,
+                             (int)(System.currentTimeMillis() - start)));
+                }
             }
         });
 
-        result.addListener(new Runnable() {
+        retval.addListener(new Runnable() {
             @Override
             public void run() {
                 m_maxOutstandingWrites.release();
@@ -403,7 +544,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         },
         MoreExecutors.sameThreadExecutor());
 
-        return result;
+        return retval;
     }
 
     private void putImpl(byte key[], byte value[], int valueCRC, boolean compressedValue) throws IOException {
@@ -482,28 +623,72 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     }
 
     @Override
-    public ListenableFuture<?> remove(final byte[] key) {
+    public ListenableFuture<RemoveResult> remove(final byte key[]) {
+        return remove(key, (m_syncByDefault ? PUTFLAG_SYNC : 0));
+    }
+
+    @Override
+    public ListenableFuture<RemoveResult> remove(final byte[] key, int flags) {
+        if (key == null) {
+            throw new IllegalArgumentException();
+        }
+
+        /*
+         * Parse out the flag for whether the future should be set
+         * when the data is synced or whether it should be set
+         * as soon as the data is written to the file descriptor
+         */
+        final boolean waitForSync = (flags & PUTFLAG_SYNC) != 0;
+        final long start = System.currentTimeMillis();
+
         try {
             m_maxOutstandingWrites.acquire();
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
-        ListenableFuture<?> result = m_writeThread.submit(new Callable<Object>() {
+
+        final SettableFuture<RemoveResult> retval = SettableFuture.create();
+
+        m_writeThread.execute(new Runnable() {
             @Override
-            public Object call() throws Exception {
-                putImpl(key, null, 0, true);
-                return null;
+            public void run() {
+                try {
+                    putImpl(key, null, 0, true);
+                } catch (Throwable t) {
+                    retval.setException(t);
+                    return;
+                }
+                if (waitForSync) {
+                    final ListenableFuture<Long> syncTask = m_nextSyncTask;
+                    syncTask.addListener(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                retval.set(
+                                        new RemoveResult(
+                                                (int)(syncTask.get() - start)));
+                            } catch (Throwable t) {
+                                retval.setException(t);
+                                return;
+                            }
+                        }
+                    }, MoreExecutors.sameThreadExecutor());
+                } else {
+                    retval.set(
+                            new RemoveResult(
+                                    (int)(System.currentTimeMillis() - start)));
+                }
             }
         });
 
-        result.addListener(new Runnable() {
+        retval.addListener(new Runnable() {
             @Override
             public void run() {
                 m_maxOutstandingWrites.release();
             }
         },
         MoreExecutors.sameThreadExecutor());
-        return result;
+        return retval;
     }
 
     @Override
@@ -520,7 +705,38 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
+        m_syncTaskRunner.cancel(false);
 
+        m_syncThread.shutdown();
+        try {
+            m_syncThread.awaitTermination(365, TimeUnit.DAYS);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
+        ListenableFutureTask<Long> syncTask = m_nextSyncTask;
+        m_nextSyncTask = null;
+
+        /*
+         * Very cheesy hack to make sure the reference to m_nextSyncTask it was leaked is done being used.
+         * I don't think it can actually be leaked because the write thread is shutdown
+         * and it is the only one that is supposed to register listeners
+         */
+        try {
+            Thread.sleep(200);
+
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
+        /*
+         * Run the last sync task to make sure any dangling listeners are synced and notified
+         */
+        syncTask.run();
+
+        /*
+         * Now close all the files
+         */
         try {
             for (MiniCask mc : m_miniCasks.values()) {
                 try {
@@ -532,8 +748,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         } finally {
             m_miniCasks.clear();
             /*
-             * Would really love those stupid fucking buffers to get unmapped
-             * you ivory tower jackasses
+             * Would really love those buffers to get unmapped
              */
             for (int ii = 0; ii < 10; ii++) {
                 System.gc();

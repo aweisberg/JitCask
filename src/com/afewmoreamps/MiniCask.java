@@ -27,6 +27,8 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.CRC32;
 
+import com.google.common.util.concurrent.ListenableFutureTask;
+
 class MiniCask implements Iterable<CaskEntry> {
     private final File m_path;
     /*
@@ -125,7 +127,16 @@ class MiniCask implements Iterable<CaskEntry> {
         return true;
     }
 
-    public byte[] getValue(int position, int length, boolean decompress) throws IOException {
+    /**
+     * If the value was compressed, return the compressed bytes and a ListenableFutureTask
+     * that will decompress the value if run.
+     * @param position
+     * @param length
+     * @param wasCompressed
+     * @return
+     * @throws IOException
+     */
+    public Object[] getValue(int position, int length, final boolean wasCompressed) throws IOException {
         if (m_fileLength == null) {
             assert(position < m_buffer.limit());
         } else {
@@ -135,7 +146,7 @@ class MiniCask implements Iterable<CaskEntry> {
         dup.position(position);
 
         final int originalCRC = dup.getInt();
-        byte valueBytes[] = new byte[length];
+        final byte valueBytes[] = new byte[length];
         dup.get(valueBytes);
 
         CRC32 crc = new CRC32();
@@ -147,10 +158,19 @@ class MiniCask implements Iterable<CaskEntry> {
             throw new IOException("CRC mismatch in record");
         }
 
-        if (decompress) {
-            valueBytes = org.xerial.snappy.Snappy.uncompress(valueBytes);
-        }
-        return valueBytes;
+        return new Object[] {
+                    wasCompressed ? valueBytes : null, //If it was never compressed,
+                                                       //don't return the valueBytes as the compressed version
+                    ListenableFutureTask.create(new Callable<byte[]>() {
+                        @Override
+                        public byte[] call() throws Exception {
+                            if (wasCompressed) {
+                                return org.xerial.snappy.Snappy.uncompress(valueBytes);
+                            } else {
+                                return valueBytes;
+                            }
+                        }
+                    })};
     }
 
     @Override

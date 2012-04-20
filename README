@@ -7,3 +7,6 @@ todo
 4. Compaction triggered by stats
 5. Multi-threaded hint file reloading
 6. Off heap zero fragmentation key storage with responsive RSS
+7. Network interface
+8. Naive async replication. Recovery is always a full sync. Manual slave promotion. Slave is readable only until promotion
+9. Stored procedures, in a language where not everything is a floating point number (j/k)
