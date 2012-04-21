@@ -28,7 +28,7 @@ import com.google.common.util.concurrent.MoreExecutors;
 
 class HintCaskOutput {
     private final ListeningExecutorService m_thread;
-    private final ByteBuffer m_hintHeader = ByteBuffer.allocate(16);
+    private final ByteBuffer m_hintHeader = ByteBuffer.allocate(14);
     private final CRCSnappyOutputStream m_outputStream;
 
     HintCaskOutput(final File path) throws IOException {
@@ -81,7 +81,7 @@ class HintCaskOutput {
                                 positions[ii] == Integer.MIN_VALUE);//Min value is tombstone sentinel
                         m_hintHeader.putInt( 0, positions[ii]);
                         m_hintHeader.putLong( 4, timestamps[ii]);
-                        m_hintHeader.putInt( 12, keys[ii].length);
+                        m_hintHeader.putShort( 12, (short)keys[ii].length);
                         m_outputStream.write(m_hintHeader.array());
                         m_outputStream.write(keys[ii]);
                     }
