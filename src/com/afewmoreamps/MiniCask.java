@@ -90,10 +90,7 @@ class MiniCask implements Iterable<CaskEntry> {
         final int headerCRC = (int)m_crc.getValue();
 
         m_buffer.putInt(headerCRC);
-        m_buffer.putLong(timestamp);
-        m_buffer.put(flags);
-        m_buffer.putShort(keyLength);
-        m_buffer.putInt(valueLength);
+        m_buffer.put(m_headerBytes.array());
         m_buffer.put(key);
         final int valuePosition = m_buffer.position();
         if (value != null) {
