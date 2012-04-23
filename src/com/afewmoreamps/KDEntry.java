@@ -16,9 +16,12 @@ package com.afewmoreamps;
 import java.nio.ByteBuffer;
 
 class KDEntry {
-    public static final int SIZE = 21;
+    /**
+     * The length of the fixed (not variable size) portion of the key dir header
+     * If you change this you need to change the value in KeyDirUnsignedBytes so the comparator still works
+     */
+    public static final int SIZE = 17;
     public final int fileId;
-    public final int valueSize;
     public final int valuePos;
     public final long timestamp;
     public final byte flags;
@@ -28,39 +31,38 @@ class KDEntry {
      */
     KDEntry() {
         fileId = -1;
-        valueSize = -1;
         valuePos = -1;
         timestamp = -1;
         flags = -1;
     }
 
-    KDEntry(byte contents[]) {
-        ByteBuffer buf = ByteBuffer.wrap(contents);
+    KDEntry(final byte contents[]) {
+        final ByteBuffer buf = ByteBuffer.wrap(contents);
+        buf.position(contents.length - SIZE);
         fileId = buf.getInt();
-        valueSize = buf.getInt();
         valuePos = buf.getInt();
         timestamp = buf.getLong();
         flags = buf.get();
     }
 
-    public static void toBytes(ByteBuffer out, int fileId, int valueSize, int valuePos, long timestamp, byte flags) {
-        out.clear();
+    public static void toBytes(ByteBuffer out, int fileId, int valuePos, long timestamp, byte flags) {
         out.putInt(fileId);
-        out.putInt(valueSize);
         out.putInt(valuePos);
         out.putLong(timestamp);
         out.put(flags);
         assert(out.position() == out.capacity());
     }
 
-    public static byte[] toBytes(int fileId, int valueSize, int valuePos, long timestamp, byte flags) {
-        ByteBuffer out = ByteBuffer.allocate(SIZE);
+    /*
+     * Assumes the key is already decorated, the storage allocated for the key is reused e.g. update in place
+     */
+    public static void toBytes(byte key[], int fileId, int valuePos, long timestamp, byte flags) {
+        ByteBuffer out = ByteBuffer.wrap(key);
+        out.position(key.length - SIZE);
         out.putInt(fileId);
-        out.putInt(valueSize);
         out.putInt(valuePos);
         out.putLong(timestamp);
         out.put(flags);
         assert(out.position() == out.capacity());
-        return out.array();
     }
 }

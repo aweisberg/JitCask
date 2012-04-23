@@ -13,19 +13,24 @@
 //limitations under the License.
 package com.afewmoreamps;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
-import sun.security.util.ByteArrayLexOrder;
+import com.google.common.primitives.KeyDirUnsignedBytes;
 
-
+/*
+ * Keys and values are the same object.
+ * The first bytes are the key, the last KDEntry.SIZE bytes are the actual data.
+ * If you are using real keys then you must decorate/undecorate.
+ */
 class KeyDir {
 
     static class SubKeyDir {
         private final ReentrantReadWriteLock m_lock = new ReentrantReadWriteLock(true);
         final TreeMap<byte[], byte[]> m_keys =
-                new TreeMap<byte[], byte[]>(new ByteArrayLexOrder());
+                new TreeMap<byte[], byte[]>( KeyDirUnsignedBytes.lexicographicalComparator());
     }
 
     final HashMap<Integer, SubKeyDir> m_subKeyDirs = new HashMap<Integer, SubKeyDir>();
@@ -43,8 +48,8 @@ class KeyDir {
 
     private int hashByteArray(byte key[]) {
         int hash = 1;
-        for (int ii = key.length - 1; ii >= 0; ii--)
-            hash = 31 * hash + (int)key[ii];
+        for (int ii = key.length - (1 + KDEntry.SIZE); ii >= 0; ii--)
+            hash = 31 * hash + key[ii];
         return hash;
     }
 
@@ -55,32 +60,49 @@ class KeyDir {
         return m_subKeyDirs.get(Math.abs(hashByteArray(key)) % m_numPartitions);
     }
 
+    private boolean keysAreEqual(byte a[], byte b[]) {
+        if (a.length != b.length) {
+            return false;
+        }
+        for (int ii = 0; ii < a.length - KDEntry.SIZE; ii++) {
+            if (a[ii] != b[ii]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /*
      * Does identity for expected.
      * Returns null on success and the unexpected value on failure
      */
-    KDEntry compareAndSet(byte key[], byte expected[], byte update[]) {
-        final SubKeyDir subKeyDir = getSubKeyDir(key);
-        assert(subKeyDir.m_lock.getWriteHoldCount() == 0);
-
-        subKeyDir.m_lock.writeLock().lock();
-        byte found[] = null;
-        try {
-            found = subKeyDir.m_keys.get(key);
-            if (found == expected) {
-                subKeyDir.m_keys.put(key, update);
-                return null;
-            }
-        } finally {
-            subKeyDir.m_lock.writeLock().unlock();
-        }
-
-        if (found == null) {
-            return new KDEntry();
-        } else {
-            return new KDEntry(found);
-        }
-    }
+//    KDEntry compareAndSet(byte expected[], byte update[]) {
+//        final SubKeyDir subKeyDir = getSubKeyDir(key);
+//        assert(update.length == expected.length);
+//        assert(subKeyDir.m_lock.getWriteHoldCount() == 0);
+//        assert(keysAreEqual(expected, update);
+//
+//        subKeyDir.m_lock.writeLock().lock();
+//        byte found[] = null;
+//        try {
+//            found = subKeyDir.m_keys.get(update);
+//            if (found == expected) {
+//                if (found != null) {
+//
+//                }
+//                subKeyDir.m_keys.put(update, update);
+//                return null;
+//            }
+//        } finally {
+//            subKeyDir.m_lock.writeLock().unlock();
+//        }
+//
+//        if (found == null) {
+//            return new KDEntry();
+//        } else {
+//            return new KDEntry(found);
+//        }
+//    }
 
     /*
      * I think that compareAndSet is the only thing actually needed since
@@ -127,16 +149,17 @@ class KeyDir {
     KDEntry get(byte key[]) {
         final SubKeyDir subKeyDir = getSubKeyDir(key);
         assert(subKeyDir.m_lock.getReadHoldCount() == 0);
+        byte entry[] = null;
         subKeyDir.m_lock.readLock().lock();
         try {
-            byte entry[] = subKeyDir.m_keys.get(key);
-            if (entry != null) {
-                return new KDEntry(entry);
-            } else {
-                return null;
-            }
+            entry = subKeyDir.m_keys.get(key);
         } finally {
             subKeyDir.m_lock.readLock().unlock();
+        }
+        if (entry != null) {
+            return new KDEntry(entry);
+        } else {
+            return null;
         }
     }
 
@@ -151,15 +174,28 @@ class KeyDir {
         }
     }
 
-    void put(byte key[], byte value[]) {
+    void put(byte key[]) {
         final SubKeyDir subKeyDir = getSubKeyDir(key);
         assert(subKeyDir.m_lock.getWriteHoldCount() == 0);
         subKeyDir.m_lock.writeLock().lock();
         try {
-            subKeyDir.m_keys.put(key, value);
+            /*
+             * Internally a new Map.Entry is not constructed by put
+             * so the only way to really use just one byte array as key/value
+             * is to remove the old one and then put the new one
+             */
+            subKeyDir.m_keys.remove(key);
+            subKeyDir.m_keys.put(key, key);
         } finally {
             subKeyDir.m_lock.writeLock().unlock();
         }
     }
 
+    static byte[] decorateKey(byte key[]) {
+        return Arrays.copyOf(key, key.length + KDEntry.SIZE);
+    }
+
+    static byte[] undecorateKey(byte key[]) {
+        return Arrays.copyOf(key, key.length - KDEntry.SIZE);
+    }
 }

@@ -89,7 +89,7 @@ public class JitCaskImplTest {
         for (CaskEntry entry : jc) {
             byte expectedKey[] = keys.get(zz);
             byte expectedValue[] = values.get(zz++);
-            assertTrue(Arrays.equals(expectedKey, entry.key));
+            assertTrue(Arrays.equals(expectedKey, Arrays.copyOfRange(entry.key, 0, keySize)));
             assertTrue(Arrays.equals(expectedValue, entry.getValueUncompressed()));
         }
 

@@ -15,6 +15,7 @@ package com.afewmoreamps;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -79,6 +80,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     private final boolean m_compressByDefault;
     private final boolean m_syncByDefault;
     private final int m_syncInterval;
+    private final int m_maxValidValueSize;
 
     private static final int READ_QUEUE_DEPTH = 64;
     private final Semaphore m_maxOutstandingReads = new Semaphore(READ_QUEUE_DEPTH);
@@ -91,6 +93,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         m_syncInterval = config.syncInterval;
         m_caskPath = config.caskPath;
         m_compressByDefault = config.compressByDefault;
+        m_maxValidValueSize = config.maxValidValueSize;
 
         if (!m_caskPath.exists()) {
             throw new IOException("Path " + m_caskPath + " does not exist");
@@ -202,7 +205,10 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             throw new IOException("Can't reuse a closed JitCask");
         }
         reloadJitCask();
-        m_outCask = new MiniCask(new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"), m_nextMiniCaskIndex);
+        m_outCask = new MiniCask(
+                new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"),
+                m_nextMiniCaskIndex,
+                m_maxValidValueSize);
         m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);
         m_nextMiniCaskIndex++;
 
@@ -259,7 +265,11 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             }
             int caskIndex = Integer.valueOf(f.getName().substring(0, f.getName().length() - 9));
             highestIndex = Math.max(caskIndex, highestIndex);
-            MiniCask cask = new MiniCask(f, caskIndex);
+            MiniCask cask =
+                new MiniCask(
+                        f,
+                        caskIndex,
+                        m_maxValidValueSize);
             m_miniCasks.put(caskIndex, cask);
         }
         m_nextMiniCaskIndex = highestIndex + 1;
@@ -268,27 +278,35 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             final SubKeyDir subKeyDir = m_keyDir.getSubKeyDir(ce.key);
             byte entryBytes[] = subKeyDir.m_keys.get(ce.key);
             if (entryBytes == null) {
+                KDEntry.toBytes(
+                        ce.key,
+                        ce.miniCask.m_fileId,
+                        ce.valuePosition,
+                        ce.timestamp,
+                        ce.flags);
                 subKeyDir.m_keys.put(
                         ce.key,
-                        KDEntry.toBytes(
-                                ce.miniCask.m_fileId,
-                                ce.valueLength,
-                                ce.valuePosition,
-                                ce.timestamp,
-                                ce.flags));
+                        ce.key);
                 continue;
             }
 
             KDEntry existingEntry = new KDEntry(entryBytes);
-            if (existingEntry.timestamp < ce.timestamp) {
+            /*
+             * Want to do the update even if the timestamp is the same
+             * it means the value was rewritten during compaction
+             */
+            if (existingEntry.timestamp <= ce.timestamp) {
+                KDEntry.toBytes(
+                        ce.key,
+                        ce.miniCask.m_fileId,
+                        ce.valuePosition,
+                        ce.timestamp,
+                        ce.flags);
+                final Object removed = subKeyDir.m_keys.remove(ce.key);
+                assert(removed != null);
                 subKeyDir.m_keys.put(
                         ce.key,
-                        KDEntry.toBytes(
-                                ce.miniCask.m_fileId,
-                                ce.valueLength,
-                                ce.valuePosition,
-                                ce.timestamp,
-                                ce.flags));
+                        ce.key);
             }
         }
 
@@ -328,7 +346,8 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             public GetResult call() throws Exception {
                 try {
                     while (true) {
-                        KDEntry entry = m_keyDir.get(key);
+                        final byte decoratedKey[] = KeyDir.decorateKey(key);
+                        KDEntry entry = m_keyDir.get(decoratedKey);
                         if (entry == null) {
                             return null;
                         }
@@ -342,11 +361,12 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                         if (mc == null) {
                             continue;
                         }
+
                         /*
                          * Potentially compressed and uncompressed value, or just the uncompressed
                          * value wrapped in a ListenableFutureTask
                          */
-                        Object values[] = mc.getValue(entry.valuePos, entry.valueSize, entry.flags == 1);
+                        Object values[] = mc.getValue(entry.valuePos, entry.flags == 1);
                         final byte compressedValue[] = (byte[]) values[0];
                         @SuppressWarnings("unchecked")
                         final ListenableFutureTask<byte[]> uncompressedValue = (ListenableFutureTask<byte[]>)values[1];
@@ -419,6 +439,9 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                     public Object[] call() throws Exception {
                         final byte compressed[] = org.xerial.snappy.Snappy.compress(value);
                         final CRC32 crc = new CRC32();
+                        ByteBuffer lengthBuffer = ByteBuffer.allocate(4);
+                        lengthBuffer.putInt(compressed.length);
+                        crc.update(lengthBuffer.array());
                         crc.update(compressed);
                         return new Object[] { compressed, (int)crc.getValue() };
                     }
@@ -432,6 +455,9 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                 @Override
                 public Object[] call() throws Exception {
                     final CRC32 crc = new CRC32();
+                    ByteBuffer lengthBuffer = ByteBuffer.allocate(4);
+                    lengthBuffer.putInt(value.length);
+                    crc.update(lengthBuffer.array());
                     crc.update(value);
                     return new Object[] { value, (int)crc.getValue() };
                 }
@@ -487,6 +513,9 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                      */
                     if (compressValue && compressionResult.length >= value.length) {
                         CRC32 crcCalc = new CRC32();
+                        ByteBuffer lengthBuffer = ByteBuffer.allocate(4);
+                        lengthBuffer.putInt(value.length);
+                        crcCalc.update(lengthBuffer.array());
                         crcCalc.update(value);
                         putImpl(key, value, (int)crcCalc.getValue(), false);
                     } else {
@@ -550,7 +579,10 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     private void putImpl(byte key[], byte value[], int valueCRC, boolean compressedValue) throws IOException {
         final long timestamp = getNextTimestamp();
         if (!m_outCask.addEntry(timestamp, key, value, valueCRC, compressedValue, m_keyDir)) {
-            m_outCask = new MiniCask(new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"), m_nextMiniCaskIndex);
+            m_outCask = new MiniCask(
+                    new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"),
+                    m_nextMiniCaskIndex,
+                    m_maxValidValueSize);
             m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);
             m_nextMiniCaskIndex++;
             if (!m_outCask.addEntry(timestamp, key, value, valueCRC, compressedValue, m_keyDir)) {

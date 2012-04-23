@@ -38,13 +38,17 @@ class MiniCask implements Iterable<CaskEntry> {
     private final MappedByteBuffer m_buffer;
     private final int HEADER_SIZE = 15;//8-byte timestamp, 1-byte flags, 2-byte key length, 4-byte value length
     private final ByteBuffer m_headerBytes = ByteBuffer.allocate(HEADER_SIZE);
-    private final ByteBuffer m_keyDirEntryBytes = ByteBuffer.allocate(KDEntry.SIZE);
     private final AtomicInteger m_fileLength;
     final int m_fileId;
     private final CRC32 m_crc = new CRC32();
+    private final int m_maxValidValueSize;
 
 
-    public MiniCask(File path, int id) throws IOException {
+    public MiniCask(
+            File path,
+            int id,
+            int maxValidValueSize) throws IOException {
+        m_maxValidValueSize = maxValidValueSize;
         m_path = path;
         m_fileId = id;
         final boolean existed = path.exists();
@@ -61,10 +65,18 @@ class MiniCask implements Iterable<CaskEntry> {
     }
 
     /*
-     * If value is null this is adding a tombstone
+     * If value is null this is adding a tombstone,
+     * The value CRC MUST include the bytes of the value length even though they
+     * will be rematerialized into the header before the CRC. This allows us to avoid storing the value length
+     * in the KeyDir saving 4 bytes. Crazy? Probably. Saving a few more bytes elsewhere as well, it all adds up
      */
     public boolean addEntry(long timestamp, byte key[], byte value[], int valueCRC, boolean compressedValue, KeyDir keyDir)
             throws IOException {
+        if (value != null && value.length > m_maxValidValueSize) {
+            throw new IOException("Value length " +
+                    value.length +
+                    " is > max valid value length " + m_maxValidValueSize);
+        }
         if (m_buffer.remaining() < HEADER_SIZE + key.length + (value != null ? value.length + 4 : 0)) {
             m_outChannel.truncate(m_buffer.position() + 1);
             m_outChannel.close();
@@ -81,7 +93,8 @@ class MiniCask implements Iterable<CaskEntry> {
 
         /*
          * This is the length being recorded,
-         * may be -1 for a tombstone
+         * may be -1 for a tombstone. There is no value CRC in this scenario.
+         * The value length is always part of the header CRC in addition to the value CRC
          */
         final int valueLength = (value != null ? value.length : -1);
         m_headerBytes.putInt(valueLength);
@@ -90,34 +103,40 @@ class MiniCask implements Iterable<CaskEntry> {
         final int headerCRC = (int)m_crc.getValue();
 
         m_buffer.putInt(headerCRC);
-        m_buffer.put(m_headerBytes.array());
+        m_buffer.put(m_headerBytes.array(), 0, HEADER_SIZE - 4);
         m_buffer.put(key);
+
+        /*
+         * Didn't calculate the CRC this way, but put the value length
+         * here so it can be retrieved on the same cache line as the value.
+         * Will have to move it back into the right spot
+         * to calculate the CRC on retrieval, but didn't want to call update
+         * on the CRC again since it is a JNI call. Premature optimization?
+         * You bet. The double JNI call penalty is stilled paid on the read end,
+         * but reads scale out and writes don't.
+         */
         final int valuePosition = m_buffer.position();
+        m_buffer.putInt(valueLength);
         if (value != null) {
             m_buffer.putInt(valueCRC);
             m_buffer.put(value);
         }
 
-        /*
-         * This is the size of the entire record and not just the payload
-         * associated with the key
-         */
-        final int valueSize = m_buffer.position() - valuePosition - 4;//-4 don't include crc
-
         if (valueLength != -1) {
             /*
              * Record the new position for this value of the key
              */
-            KDEntry.toBytes(m_keyDirEntryBytes, m_fileId, valueSize, valuePosition, timestamp, flags);
-            byte kdbytes[] = new byte[KDEntry.SIZE];
-            System.arraycopy(m_keyDirEntryBytes.array(), 0, kdbytes, 0, KDEntry.SIZE);
-            keyDir.put(key, kdbytes);
+            ByteBuffer keyDirEntryBytes = ByteBuffer.allocate(KDEntry.SIZE + key.length);
+            System.arraycopy(key,0, keyDirEntryBytes.array(), 0, key.length);
+            keyDirEntryBytes.position(key.length);
+            KDEntry.toBytes(keyDirEntryBytes, m_fileId, valuePosition, timestamp, flags);
+            keyDir.put(keyDirEntryBytes.array());
         } else {
             /*
              * Remove the value from the keydir now that
              * the tombstone has been created
              */
-            keyDir.remove(key);
+            keyDir.remove(KeyDir.decorateKey(key));
         }
 
         m_fileLength.lazySet(m_buffer.position());
@@ -133,7 +152,7 @@ class MiniCask implements Iterable<CaskEntry> {
      * @return
      * @throws IOException
      */
-    public Object[] getValue(int position, int length, final boolean wasCompressed) throws IOException {
+    public Object[] getValue(int position, final boolean wasCompressed) throws IOException {
         if (m_fileLength == null) {
             assert(position < m_buffer.limit());
         } else {
@@ -142,11 +161,21 @@ class MiniCask implements Iterable<CaskEntry> {
         ByteBuffer dup = m_buffer.asReadOnlyBuffer();
         dup.position(position);
 
+        ByteBuffer lengthBytes = ByteBuffer.allocate(4);
+        dup.get(lengthBytes.array());
+        final int length = lengthBytes.getInt();
         final int originalCRC = dup.getInt();
+
+        if (length < 0 || length > 1024 * 1024 * 100) {
+            throw new IOException(
+                    "Length (" + length + ") is probably not a valid value, retrieved from " +
+                    m_path + " position " + position);
+        }
         final byte valueBytes[] = new byte[length];
         dup.get(valueBytes);
 
         CRC32 crc = new CRC32();
+        crc.update(lengthBytes.array());
         crc.update(valueBytes);
         final int actualCRC = (int)crc.getValue();
 
@@ -186,13 +215,36 @@ class MiniCask implements Iterable<CaskEntry> {
                         return null;
                     }
                     final long startPosition = view.position();
-                    ByteBuffer header = ByteBuffer.allocate(HEADER_SIZE + 4);
-                    view.get(header.array());
+                    /*
+                     * The last 4-bytes of the header (the value length) are not in the right place.
+                     * Will put them there manually later
+                     */
+                    final ByteBuffer header = ByteBuffer.allocate(HEADER_SIZE + 4);
+                    final byte headerBytes[] = header.array();
+                    view.get(headerBytes, 0, HEADER_SIZE);
 
                     final int originalHeaderCRC = header.getInt();
                     final long timestamp = header.getLong();
                     final byte flags = header.get();
+
+                    /*
+                     * Need to know the key size to find the position
+                     * of the value size
+                     */
                     final short keySize = header.getShort();
+                    if (keySize < 0) {
+                        throw new RuntimeException(
+                                "Length (" + keySize + ") is probably not a valid key, retrieved from " +
+                                m_path + " position " + startPosition);
+                    }
+
+
+                    final byte keyBytes[] = new byte[keySize + KDEntry.SIZE];
+                    view.get(keyBytes, 0, keySize);
+
+                    //Skip the key and the CRC for the value to get the length of the value
+                    //which was moved forward on put
+                    view.get(headerBytes, HEADER_SIZE, 4);
                     final int valueSize = header.getInt();
                     int actualValueSize = 0;
                     if (valueSize >= 0) {
@@ -200,16 +252,9 @@ class MiniCask implements Iterable<CaskEntry> {
                     }
 
                     final CRC32 crc = new CRC32();
-                    crc.update(header.array(), 4, HEADER_SIZE);
-                    if (view.remaining() < keySize + actualValueSize) {
-                        return null;
-                    }
-                    if (keySize < 0) {
-                        System.out.println("Uhoh");
-                    }
-                    final byte keyBytes[] = new byte[keySize];
-                    view.get(keyBytes);
-                    crc.update(keyBytes);
+                    crc.update(headerBytes, 4, HEADER_SIZE);
+
+                    crc.update(keyBytes, 0, keySize);
                     final int actualHeaderCRC = (int)crc.getValue();
                     if (actualHeaderCRC != originalHeaderCRC) {
                         System.err.println("Had a corrupt entry header in " + m_path + " at position " + startPosition);
@@ -231,10 +276,11 @@ class MiniCask implements Iterable<CaskEntry> {
                     }
 
                     final byte valueBytes[] = new byte[actualValueSize];
-                    final int valuePosition = view.position();
+                    final int valuePosition = view.position() - 4;
                     final int originalValueCRC = view.getInt();
                     view.get(valueBytes);
                     crc.reset();
+                    crc.update(headerBytes, headerBytes.length - 4, 4);
                     crc.update(valueBytes);
                     final int actualValueCRC = (int)crc.getValue();
                     if (actualValueCRC != originalValueCRC) {
