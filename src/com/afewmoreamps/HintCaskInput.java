@@ -31,12 +31,14 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
 
 import com.afewmoreamps.util.DirectMemoryUtils;
+import com.afewmoreamps.util.PrefetchingInputStream;
 import com.google.common.util.concurrent.ListenableFutureTask;
 
 class HintCaskInput {
     private final FileInputStream m_fis;
     private final FileChannel m_channel;
     private final File m_path;
+    private PrefetchingInputStream m_pis;//used when retrieving the actual keys
 
     HintCaskInput(final File path) throws IOException {
         this.m_path = path;
@@ -64,41 +66,23 @@ class HintCaskInput {
         final int expectedCRC = expectedCRCBytes.getInt();
 
         final CRC32 crc = new CRC32();
-
-
+        PrefetchingInputStream pis = new PrefetchingInputStream(m_channel, 1024 * 1024 * 16, 3);
         try {
-            ExecutorService es = Executors.newSingleThreadExecutor();
-            try {
-
-                for (ListenableFutureTask<ByteBuffer> task : readTasks) {
-                    ByteBuffer buffer = null;
-                    try {
-                        buffer = task.get();
-                    } catch (ExecutionException e) {
-                        e.printStackTrace();
-                        System.exit(-1);
-                    }
-
-                    byte nextCRCBytes[] = new byte[1024 * 32];
-                    while (buffer.hasRemaining()) {
-                        if (nextCRCBytes.length > buffer.remaining()) {
-                            nextCRCBytes = new byte[buffer.remaining()];
-                        }
-                        crc.update(nextCRCBytes);
-                        availableBuffers.offer(buffer);
-                    }
-                }
-
-                if (((int)crc.getValue()) != expectedCRC) {
-                    return false;
-                }
-                return true;
-            } finally {
-
+            byte crcBytes[] = new byte[1024 * 32];
+            while (true) {
+                int read = pis.read(crcBytes);
+                if (read == -1) break;
+                crc.update(crcBytes, 0, read);
             }
+            if (expectedCRC == ((int)crc.getValue())) {
+                return true;
+            }
+            return false;
         } finally {
-
+            pis.close();
         }
     }
+
+
 
 }
