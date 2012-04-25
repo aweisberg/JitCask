@@ -46,7 +46,7 @@ class KeyDir {
         }
     }
 
-    private int hashByteArray(byte key[]) {
+    private int hashByteBuffer(byte key[]) {
         int hash = 1;
         for (int ii = key.length - (1 + KDEntry.SIZE); ii >= 0; ii--)
             hash = 31 * hash + key[ii];
@@ -57,20 +57,20 @@ class KeyDir {
      * Leaked to avoid locking for reload
      */
     SubKeyDir getSubKeyDir(byte key[]) {
-        return m_subKeyDirs.get(Math.abs(hashByteArray(key)) % m_numPartitions);
+        return m_subKeyDirs.get(Math.abs(hashByteBuffer(key)) % m_numPartitions);
     }
 
-    private boolean keysAreEqual(byte a[], byte b[]) {
-        if (a.length != b.length) {
-            return false;
-        }
-        for (int ii = 0; ii < a.length - KDEntry.SIZE; ii++) {
-            if (a[ii] != b[ii]) {
-                return false;
-            }
-        }
-        return true;
-    }
+//    private boolean keysAreEqual(byte a[], byte b[]) {
+//        if (a.length != b.length) {
+//            return false;
+//        }
+//        for (int ii = 0; ii < a.length - KDEntry.SIZE; ii++) {
+//            if (a[ii] != b[ii]) {
+//                return false;
+//            }
+//        }
+//        return true;
+//    }
 
     /*
      * Does identity for expected.

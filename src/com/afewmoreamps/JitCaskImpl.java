@@ -29,7 +29,6 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.zip.CRC32;
 
 import com.afewmoreamps.KeyDir.SubKeyDir;
 import com.afewmoreamps.util.COWMap;
@@ -39,25 +38,10 @@ import com.google.common.util.concurrent.*;
 class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
     /**
-     * If this flag is set the value returned by get will be
-     */
-    public static final int GETFLAG_UNCOMPRESS = 1;
-
-    /**
-     * If this flag is set the value supplied put will be compressed for storage
-     */
-    public static final int PUTFLAG_COMPRESS = 1;
-
-    /**
      * If this flag is set then put will not return until
      * the data is fsynced
      */
     public static final int PUTFLAG_SYNC = 1 << 1;
-
-    /**
-     * Constant with the recommended default of compress and sync
-     */
-    public static final int PUTFLAG_COMPRESS_AND_SYNC = PUTFLAG_COMPRESS | PUTFLAG_SYNC;
 
     private final File m_caskPath;
 
@@ -77,7 +61,6 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
     private int m_nextMiniCaskIndex = 0;
 
-    private final boolean m_compressByDefault;
     private final boolean m_syncByDefault;
     private final int m_syncInterval;
     private final int m_maxValidValueSize;
@@ -92,7 +75,6 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         m_syncByDefault = config.syncByDefault;
         m_syncInterval = config.syncInterval;
         m_caskPath = config.caskPath;
-        m_compressByDefault = config.compressByDefault;
         m_maxValidValueSize = config.maxValidValueSize;
 
         if (!m_caskPath.exists()) {
@@ -275,18 +257,20 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         m_nextMiniCaskIndex = highestIndex + 1;
 
         for (CaskEntry ce : this) {
-            final SubKeyDir subKeyDir = m_keyDir.getSubKeyDir(ce.key);
+            final byte keyBytes[] = new byte[ce.key.remaining() + KDEntry.SIZE];
+            ce.key.get(keyBytes, 0, ce.key.remaining());
+            final SubKeyDir subKeyDir = m_keyDir.getSubKeyDir(keyBytes);
             byte entryBytes[] = subKeyDir.m_keys.get(ce.key);
             if (entryBytes == null) {
                 KDEntry.toBytes(
-                        ce.key,
+                        keyBytes,
                         ce.miniCask.m_fileId,
                         ce.valuePosition,
                         ce.timestamp,
                         ce.flags);
                 subKeyDir.m_keys.put(
-                        ce.key,
-                        ce.key);
+                        keyBytes,
+                        keyBytes);
                 continue;
             }
 
@@ -297,16 +281,16 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
              */
             if (existingEntry.timestamp <= ce.timestamp) {
                 KDEntry.toBytes(
-                        ce.key,
+                        keyBytes,
                         ce.miniCask.m_fileId,
                         ce.valuePosition,
                         ce.timestamp,
                         ce.flags);
-                final Object removed = subKeyDir.m_keys.remove(ce.key);
+                final Object removed = subKeyDir.m_keys.remove(keyBytes);
                 assert(removed != null);
                 subKeyDir.m_keys.put(
-                        ce.key,
-                        ce.key);
+                        keyBytes,
+                        keyBytes);
             }
         }
 
@@ -328,13 +312,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
     @Override
     public ListenableFuture<GetResult> get(final byte[] key) {
-        return get(key, 0);
-    }
-
-    @Override
-    public ListenableFuture<GetResult> get(final byte[] key, int flags) {
         final long start = System.currentTimeMillis();
-        final boolean uncompressValue = (flags & GETFLAG_UNCOMPRESS) != 0 ? true : false;
 
         try {
             m_maxOutstandingReads.acquire();
@@ -366,17 +344,10 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                          * Potentially compressed and uncompressed value, or just the uncompressed
                          * value wrapped in a ListenableFutureTask
                          */
-                        Object values[] = mc.getValue(entry.valuePos, entry.flags == 1);
-                        final byte compressedValue[] = (byte[]) values[0];
-                        @SuppressWarnings("unchecked")
-                        final ListenableFutureTask<byte[]> uncompressedValue = (ListenableFutureTask<byte[]>)values[1];
-                        if (uncompressValue) {
-                            uncompressedValue.run();
-                        }
+                        ByteBuffer value = mc.getValue(entry.valuePos);
                         return new GetResult(
                                 key,
-                                compressedValue,
-                                uncompressedValue,
+                                value,
                                 (int)(System.currentTimeMillis() - start));
                     }
                 } finally {
@@ -391,7 +362,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         return put(
                 key,
                 value,
-                (m_compressByDefault ? PUTFLAG_COMPRESS : 0) | (m_syncByDefault ? PUTFLAG_SYNC : 0));
+                (m_syncByDefault ? PUTFLAG_SYNC : 0));
     }
 
     @Override
@@ -405,12 +376,6 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
          * Record when the put started
          */
         final long start = System.currentTimeMillis();
-
-        /*
-         * Parse out the flag for whether an attempt to
-         * should be made to compress the value
-         */
-        final boolean compressValue = (flags & PUTFLAG_COMPRESS) != 0;
 
         /*
          * Parse out the flag for whether the future should be set
@@ -432,40 +397,19 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
          * the more CPU intensive part of a write. Can't have more write
          * threads so best to scale out as far as possible before giving it work.
          */
-        ListenableFuture<Object[]> compressedValueTemp;
-        if (compressValue) {
-            compressedValueTemp = m_compressionThreads.submit(new Callable<Object[]>() {
-                    @Override
-                    public Object[] call() throws Exception {
-                        final byte compressed[] = org.xerial.snappy.Snappy.compress(value);
-                        final CRC32 crc = new CRC32();
-                        ByteBuffer lengthBuffer = ByteBuffer.allocate(4);
-                        lengthBuffer.putInt(compressed.length);
-                        crc.update(lengthBuffer.array());
-                        crc.update(compressed);
-                        return new Object[] { compressed, (int)crc.getValue() };
-                    }
-            });
-        } else {
-            /*
-             * Generate a task in the compression threads to just calculate the CRC
-             * since compression was not requested.
-             */
-            compressedValueTemp = ListenableFutureTask.create(new Callable<Object[]>() {
+        final ListenableFuture<Object[]> assembledEntryFuture =
+            m_compressionThreads.submit(new Callable<Object[]>() {
                 @Override
                 public Object[] call() throws Exception {
-                    final CRC32 crc = new CRC32();
-                    ByteBuffer lengthBuffer = ByteBuffer.allocate(4);
-                    lengthBuffer.putInt(value.length);
-                    crc.update(lengthBuffer.array());
-                    crc.update(value);
-                    return new Object[] { value, (int)crc.getValue() };
+                    final long timestamp = getNextTimestamp();
+                    final Object crcAndEntry[] = MiniCask.constructEntry(key, value, timestamp);
+                    return new Object[] {
+                            crcAndEntry[0],
+                            crcAndEntry[1],
+                            timestamp
+                    };
                 }
-            });
-            ((ListenableFutureTask<Object[]>)compressedValueTemp).run();
-        }
-        //Final version so it can be bound
-        final ListenableFuture<Object[]> compressedValue = compressedValueTemp;
+        });
 
         /*
          * Limit the maximum number of outstanding writes
@@ -476,6 +420,13 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
+        retval.addListener(new Runnable() {
+            @Override
+            public void run() {
+                m_maxOutstandingWrites.release();
+            }
+        },
+        MoreExecutors.sameThreadExecutor());
 
         /*
          * Submit the write to the single write thread
@@ -493,38 +444,21 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                  * Retrieve the compression results, forwarding any exceptions
                  * to the retval future.
                  */
-                Object compressionResults[];
+                Object assembledEntry[];
                 try {
-                    compressionResults = compressedValue.get();
+                    assembledEntry = assembledEntryFuture.get();
                 } catch (Throwable t) {
                     retval.setException(t);
                     return;
                 }
 
-                final byte compressionResult[] = (byte[])compressionResults[0];
-                final int crc = (Integer)compressionResults[1];
+                final int crc = ((Integer)assembledEntry[0]).intValue();
+                final byte entryBytes[] = (byte[])assembledEntry[1];
+                final long timestamp = ((Long)assembledEntry[2]).longValue();
+                final boolean isTombstone = value == null;
 
                 try {
-                    /*
-                     * If compression didn't improve things, don't apply it,
-                     * go with the original value.  That means calculating the crc
-                     * of the uncompressed value in the write thread. Might not be the
-                     * right tradeoff since sequential IO is cheap?
-                     */
-                    if (compressValue && compressionResult.length >= value.length) {
-                        CRC32 crcCalc = new CRC32();
-                        ByteBuffer lengthBuffer = ByteBuffer.allocate(4);
-                        lengthBuffer.putInt(value.length);
-                        crcCalc.update(lengthBuffer.array());
-                        crcCalc.update(value);
-                        putImpl(key, value, (int)crcCalc.getValue(), false);
-                    } else {
-                        /*
-                         * Put the possibly compressed or uncompressed value
-                         * in the current cask
-                         */
-                        putImpl(key, compressionResult, crc, compressValue);
-                    }
+                    putImpl( crc, entryBytes, key, timestamp, isTombstone);
                 } catch (Throwable t) {
                     retval.setException(t);
                     return;
@@ -546,8 +480,8 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                             try {
                                 retval.set(
                                         new PutResult(
-                                                value.length,
-                                                compressionResult.length,
+                                                key.length + value.length + MiniCask.HEADER_SIZE + 4,//What goes into the entry, 4 is the CRC
+                                                entryBytes.length,
                                                 (int)(syncTask.get() - start)));
                             } catch (Throwable t) {
                                 retval.setException(t);
@@ -558,34 +492,30 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                 } else {
                     retval.set(
                         new PutResult(
-                            value.length,
-                            compressionResult.length,
+                            key.length + value.length + MiniCask.HEADER_SIZE + 4,//WHat goes into the entry, 4 is the CRC
+                            entryBytes.length,
                              (int)(System.currentTimeMillis() - start)));
                 }
             }
         });
 
-        retval.addListener(new Runnable() {
-            @Override
-            public void run() {
-                m_maxOutstandingWrites.release();
-            }
-        },
-        MoreExecutors.sameThreadExecutor());
-
         return retval;
     }
 
-    private void putImpl(byte key[], byte value[], int valueCRC, boolean compressedValue) throws IOException {
-        final long timestamp = getNextTimestamp();
-        if (!m_outCask.addEntry(timestamp, key, value, valueCRC, compressedValue, m_keyDir)) {
+    private void putImpl(
+            int crc,
+            byte entry[],
+            byte key[],
+            long timestamp,
+            boolean isTombstone) throws IOException {
+        if (!m_outCask.addEntry(crc, entry, key, (byte)0, timestamp, isTombstone, m_keyDir)) {
             m_outCask = new MiniCask(
                     new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"),
                     m_nextMiniCaskIndex,
                     m_maxValidValueSize);
             m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);
             m_nextMiniCaskIndex++;
-            if (!m_outCask.addEntry(timestamp, key, value, valueCRC, compressedValue, m_keyDir)) {
+            if (!m_outCask.addEntry(crc, entry, key, (byte)0, timestamp, isTombstone, m_keyDir)) {
                 throw new IOException("Unable to place value in an empty bitcask, should never happen");
             }
         }
@@ -599,7 +529,11 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     private long lastReturnedTime = System.currentTimeMillis();
     private long counter = 0;
 
-    private long getNextTimestamp() {
+    /*
+     * Should be the only thing sychronizing on the intrinsic lock of this
+     * class
+     */
+    private synchronized long getNextTimestamp() {
         final long now = System.currentTimeMillis();
 
         if (now < lastReturnedTime) {
@@ -680,12 +614,29 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         }
 
         final SettableFuture<RemoveResult> retval = SettableFuture.create();
+        retval.addListener(new Runnable() {
+            @Override
+            public void run() {
+                m_maxOutstandingWrites.release();
+            }
+        },
+        MoreExecutors.sameThreadExecutor());
+
+        final long timestamp = getNextTimestamp();
+        Object assembledEntryTemp[];
+        try {
+            assembledEntryTemp = MiniCask.constructEntry(key, null, timestamp);
+        } catch (IOException e) {
+            retval.setException(e);
+            return retval;
+        }
+        final Object assembledEntry[] = assembledEntryTemp;
 
         m_writeThread.execute(new Runnable() {
             @Override
             public void run() {
                 try {
-                    putImpl(key, null, 0, true);
+                    putImpl(((Integer)assembledEntry[0]).intValue(), (byte[])assembledEntry[1], key, timestamp, true);
                 } catch (Throwable t) {
                     retval.setException(t);
                     return;
@@ -712,14 +663,6 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                 }
             }
         });
-
-        retval.addListener(new Runnable() {
-            @Override
-            public void run() {
-                m_maxOutstandingWrites.release();
-            }
-        },
-        MoreExecutors.sameThreadExecutor());
         return retval;
     }
 

@@ -14,6 +14,7 @@
 package com.afewmoreamps;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 class KDEntry {
     /**
@@ -37,7 +38,7 @@ class KDEntry {
     }
 
     KDEntry(final byte contents[]) {
-        final ByteBuffer buf = ByteBuffer.wrap(contents);
+        final ByteBuffer buf = ByteBuffer.wrap(contents).order(ByteOrder.nativeOrder());
         buf.position(contents.length - SIZE);
         fileId = buf.getInt();
         valuePos = buf.getInt();
@@ -57,7 +58,7 @@ class KDEntry {
      * Assumes the key is already decorated, the storage allocated for the key is reused e.g. update in place
      */
     public static void toBytes(byte key[], int fileId, int valuePos, long timestamp, byte flags) {
-        ByteBuffer out = ByteBuffer.wrap(key);
+        ByteBuffer out = ByteBuffer.wrap(key).order(ByteOrder.nativeOrder());;
         out.position(key.length - SIZE);
         out.putInt(fileId);
         out.putInt(valuePos);

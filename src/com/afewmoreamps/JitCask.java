@@ -21,7 +21,6 @@ public interface JitCask {
     public void open() throws IOException;
 
     public ListenableFuture<GetResult> get(byte key[]);
-    public ListenableFuture<GetResult> get(byte key[], int flags);
 
     public ListenableFuture<PutResult> put(byte key[], byte value[]);
     public ListenableFuture<PutResult> put(byte key[], byte value[], int flags);

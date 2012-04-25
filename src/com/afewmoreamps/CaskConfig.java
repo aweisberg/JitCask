@@ -18,7 +18,6 @@ import java.io.File;
 public class CaskConfig {
     final File caskPath;
     public int syncInterval = 100;
-    public boolean compressByDefault = true;
     public boolean syncByDefault = true;
     public int maxValidValueSize = 1024 * 1024 * 100;
 

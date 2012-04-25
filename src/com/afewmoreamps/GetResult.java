@@ -13,32 +13,20 @@
 //limitations under the License.
 package com.afewmoreamps;
 
-import java.io.IOException;
-import java.util.concurrent.ExecutionException;
-
-import com.google.common.util.concurrent.ListenableFutureTask;
+import java.nio.ByteBuffer;
+import java.util.Arrays;
 
 public class GetResult extends OpResult {
-    private final ListenableFutureTask<byte[]> value;
-    public final byte compressedValue[];
+    public final ByteBuffer value;
     public final byte key[];
 
-    public GetResult(byte key[], byte compressedValue[], ListenableFutureTask<byte[]> value, int latency) {
+    public GetResult(byte key[], ByteBuffer value,  int latency) {
         super(latency);
         this.key = key;
-        this.compressedValue = compressedValue;
         this.value = value;
     }
 
-    public byte[] value() throws IOException {
-        value.run();
-        try {
-            return value.get();
-        } catch (ExecutionException e) {
-            throw new IOException(e.getCause());
-        } catch (Exception e) {
-            //Dont expect to do this.
-            throw new IOException(e);
-        }
+    public byte[] valueBytes() {
+        return Arrays.copyOfRange(value.array(), value.arrayOffset(), value.capacity());
     }
 }

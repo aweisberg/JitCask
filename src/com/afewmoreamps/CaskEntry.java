@@ -13,44 +13,31 @@
 //limitations under the License.
 package com.afewmoreamps;
 
-import java.util.concurrent.FutureTask;
-
+import java.nio.ByteBuffer;
 
 class CaskEntry {
     final MiniCask miniCask;
     final long timestamp;
     final byte flags;
-    final byte key[];
+    final ByteBuffer key;
     final int valuePosition;
     final int valueLength;
-    final byte[] valueCompressed;
-    private final FutureTask<byte[]> valueUncompressed;
+    final ByteBuffer value;
 
     public CaskEntry(
             MiniCask miniCask,
             long timestamp,
             byte flags,
-            byte key[],
+            ByteBuffer key,
             int valuePosition,
             int valueLength,
-            byte[] valueCompressed,
-            FutureTask<byte[]> valueUncompressed) {
+            ByteBuffer value) {
         this.miniCask = miniCask;
         this.timestamp = timestamp;
         this.flags = flags;
         this.key = key;
         this.valuePosition = valuePosition;
         this.valueLength = valueLength;
-        this.valueCompressed = valueCompressed;
-        this.valueUncompressed = valueUncompressed;
-    }
-
-    public byte[] getValueUncompressed() {
-        valueUncompressed.run();
-        try {
-            return valueUncompressed.get();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        this.value = value;
     }
 }

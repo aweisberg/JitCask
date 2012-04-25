@@ -89,15 +89,15 @@ public class JitCaskImplTest {
         for (CaskEntry entry : jc) {
             byte expectedKey[] = keys.get(zz);
             byte expectedValue[] = values.get(zz++);
-            assertTrue(Arrays.equals(expectedKey, Arrays.copyOfRange(entry.key, 0, keySize)));
-            assertTrue(Arrays.equals(expectedValue, entry.getValueUncompressed()));
+            assertTrue(Arrays.equals(expectedKey, Arrays.copyOfRange(entry.key.array(), entry.key.arrayOffset(), keySize)));
+            assertTrue(Arrays.equals(expectedValue, entry.value.array()));
         }
 
         zz = 0;
         for (int ii = 0; ii < keyCount; ii++) {
             byte expectedKey[] = keys.get(zz);
             byte expectedValue[] = values.get(zz++);
-            assertTrue(Arrays.equals(expectedValue, jc.get(expectedKey).get().value()));
+            assertTrue(Arrays.equals(expectedValue, jc.get(expectedKey).get().valueBytes()));
         }
 
         results.clear();
@@ -119,7 +119,7 @@ public class JitCaskImplTest {
             byte expectedKey[] = keys.get(zz);
             byte expectedValue[] = values.get(zz++);
             if (ii % 2 == 0) {
-                assertTrue(Arrays.equals(expectedValue, jc.get(expectedKey).get().value()));
+                assertTrue(Arrays.equals(expectedValue, jc.get(expectedKey).get().valueBytes()));
             } else {
                 assertNull(jc.get(expectedKey).get());
             }
@@ -135,7 +135,7 @@ public class JitCaskImplTest {
             byte expectedValue[] = values.get(zz++);
             if (ii % 2 == 0) {
                 try {
-                    byte value[] = jc.get(expectedKey).get().value();
+                    byte value[] = jc.get(expectedKey).get().valueBytes();
                     boolean equals = Arrays.equals(expectedValue, value);
                     if (!equals) {
                         System.out.println(ii);
@@ -144,7 +144,7 @@ public class JitCaskImplTest {
                     System.out.println(ii);
                     throw e;
                 }
-                assertTrue(Arrays.equals(expectedValue, jc.get(expectedKey).get().value()));
+                assertTrue(Arrays.equals(expectedValue, jc.get(expectedKey).get().valueBytes()));
             } else {
                 assertNull(jc.get(expectedKey).get());
             }
