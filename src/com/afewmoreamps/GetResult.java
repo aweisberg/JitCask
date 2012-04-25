@@ -27,6 +27,6 @@ public class GetResult extends OpResult {
     }
 
     public byte[] valueBytes() {
-        return Arrays.copyOfRange(value.array(), value.arrayOffset(), value.capacity());
+        return Arrays.copyOfRange(value.array(), value.arrayOffset(), value.arrayOffset() + value.capacity());
     }
 }

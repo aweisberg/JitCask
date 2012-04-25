@@ -260,7 +260,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             final byte keyBytes[] = new byte[ce.key.remaining() + KDEntry.SIZE];
             ce.key.get(keyBytes, 0, ce.key.remaining());
             final SubKeyDir subKeyDir = m_keyDir.getSubKeyDir(keyBytes);
-            byte entryBytes[] = subKeyDir.m_keys.get(ce.key);
+            byte entryBytes[] = subKeyDir.m_keys.get(keyBytes);
             if (entryBytes == null) {
                 KDEntry.toBytes(
                         keyBytes,

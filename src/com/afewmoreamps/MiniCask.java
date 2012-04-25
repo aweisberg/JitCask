@@ -310,7 +310,9 @@ class MiniCask implements Iterable<CaskEntry> {
         buildBuf.putShort((short)key.length);
         buildBuf.putInt(value == null ? -1 : value.length);
         buildBuf.put(key);
-        buildBuf.put(value);
+        if (value != null) {
+            buildBuf.put(value);
+        }
 
         byte compressedBytes[] = org.xerial.snappy.Snappy.compress(buildBuf.array());
 

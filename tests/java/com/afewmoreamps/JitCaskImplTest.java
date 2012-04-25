@@ -89,8 +89,8 @@ public class JitCaskImplTest {
         for (CaskEntry entry : jc) {
             byte expectedKey[] = keys.get(zz);
             byte expectedValue[] = values.get(zz++);
-            assertTrue(Arrays.equals(expectedKey, Arrays.copyOfRange(entry.key.array(), entry.key.arrayOffset(), keySize)));
-            assertTrue(Arrays.equals(expectedValue, entry.value.array()));
+            assertTrue(Arrays.equals(expectedKey, Arrays.copyOfRange(entry.key.array(), entry.key.arrayOffset(), entry.key.arrayOffset() + keySize)));
+            assertTrue(Arrays.equals(expectedValue, Arrays.copyOfRange( entry.value.array(), entry.value.arrayOffset(), entry.value.arrayOffset() + valueSize)));
         }
 
         zz = 0;
@@ -190,16 +190,39 @@ public class JitCaskImplTest {
 //                start = System.currentTimeMillis();
 //            }
 //        }
-
+//
 //        long start = System.currentTimeMillis();
 //        int keyIndex = 0;
-//        while (true) {
+//        int totalKeys = 52000000;
+//        while (keyIndex < totalKeys) {
 //            ByteBuffer keyBuffer = ByteBuffer.allocate(keySize);
 //            keyBuffer.putInt(keyIndex++);
 //            byte key[] = keyBuffer.array();
 //            jc.put(key, new byte[0]);
 //            if (keyIndex % 1000000 == 0) {
 //                System.out.println("Inserted " + (keyIndex / 1000000) + " million 64 byte keys in " + ((System.currentTimeMillis() - start) / 1000) + " seconds");
+//            }
+//        }
+//
+//        while (true) {
+//            int keysToDelete = 5000000;
+//            ByteBuffer deletedKeys = ByteBuffer.allocateDirect(keysToDelete * 4);
+//            for (int ii = 0; ii < keysToDelete; ii++) {
+//                ByteBuffer keyBuffer = ByteBuffer.allocate(keySize);
+//                int keyToDelete = r.nextInt(totalKeys);
+//                deletedKeys.putInt(keyToDelete);
+//                keyBuffer.putInt(keyToDelete);
+//                byte key[] = keyBuffer.array();
+//                jc.remove(key);
+//                if (ii % 1000000 == 0) {
+//                    System.out.println("Deleted " + (ii / 1000000) + " million 64 byte keys in " + ((System.currentTimeMillis() - start) / 1000) + " seconds");
+//                }
+//            }
+//            deletedKeys.flip();
+//            while (deletedKeys.hasRemaining()) {
+//                ByteBuffer keyBuffer = ByteBuffer.allocate(keySize);
+//                keyBuffer.putInt(deletedKeys.getInt());
+//                jc.put(keyBuffer.array(), new byte[0]);
 //            }
 //        }
     }
