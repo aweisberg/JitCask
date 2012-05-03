@@ -37,16 +37,27 @@ class MiniCask implements Iterable<CaskEntry> {
     private final AtomicInteger m_fileLength;
     final int m_fileId;
     private final int m_maxValidValueSize;
-
+    private HintCaskOutput m_hintCaskOutput;
+    private HintCaskInput m_hintCaskInput;
 
     public MiniCask(
             File path,
             int id,
             int maxValidValueSize) throws IOException {
         m_maxValidValueSize = maxValidValueSize;
-        m_path = path;
+        m_path = new File(path, id + ".minicask");
+        final boolean existed = m_path.exists();
         m_fileId = id;
-        final boolean existed = path.exists();
+        File hintCaskPath = new File(path, id + ".hintcask");
+        if (hintCaskPath.exists()) {
+            if (!existed) {
+                throw new IOException("Can't have a hint file without a cask file");
+            }
+            m_hintCaskInput = new HintCaskInput(hintCaskPath);
+        } else {
+            m_hintCaskOutput = new HintCaskOutput(hintCaskPath);
+        }
+
         RandomAccessFile ras = new RandomAccessFile(m_path, "rw");
         m_outChannel = ras.getChannel();
         if (!existed) {
@@ -72,6 +83,13 @@ class MiniCask implements Iterable<CaskEntry> {
         if (m_buffer.remaining() < entry.length) {
             m_outChannel.truncate(m_buffer.position() + 1);//Forgot why the +1? Maybe I should remove it? Not a good sign
             m_outChannel.close();
+            try {
+                m_hintCaskOutput.close();
+            } catch (InterruptedException e) {
+                throw new IOException(e);
+            } finally {
+                m_hintCaskOutput = null;
+            }
             return false;
         }
 
@@ -224,12 +242,9 @@ class MiniCask implements Iterable<CaskEntry> {
                                 flags,
                                 key,
                                 -1,
-                                -1,
-                                null);
+                                -1);
                         break;
                     }
-
-                    final ByteBuffer value = entry.slice();
 
                     newEntry =
                         new CaskEntry(
@@ -238,8 +253,7 @@ class MiniCask implements Iterable<CaskEntry> {
                             flags,
                             key,
                             entryStartPosition,
-                            entryLength + 4,
-                            value);
+                            entryLength + 4);
                 }
                 assert(newEntry != null);
                 return newEntry;

@@ -22,7 +22,6 @@ class CaskEntry {
     final ByteBuffer key;
     final int valuePosition;
     final int valueLength;
-    final ByteBuffer value;
 
     public CaskEntry(
             MiniCask miniCask,
@@ -30,14 +29,12 @@ class CaskEntry {
             byte flags,
             ByteBuffer key,
             int valuePosition,
-            int valueLength,
-            ByteBuffer value) {
+            int valueLength) {
         this.miniCask = miniCask;
         this.timestamp = timestamp;
         this.flags = flags;
         this.key = key;
         this.valuePosition = valuePosition;
         this.valueLength = valueLength;
-        this.value = value;
     }
 }

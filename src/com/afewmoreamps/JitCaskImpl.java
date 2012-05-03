@@ -188,7 +188,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         }
         reloadJitCask();
         m_outCask = new MiniCask(
-                new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"),
+                m_caskPath,
                 m_nextMiniCaskIndex,
                 m_maxValidValueSize);
         m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);

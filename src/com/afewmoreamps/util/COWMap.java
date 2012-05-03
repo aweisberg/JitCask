@@ -12,11 +12,13 @@
 //See the License for the specific language governing permissions and
 //limitations under the License.
 package com.afewmoreamps.util;
+
 import java.util.Collection;
-import java.util.Collections;
-import java.util.TreeMap;
 import java.util.Map;
 import java.util.Set;
+
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableMap.Builder;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -24,17 +26,17 @@ import java.util.concurrent.atomic.AtomicReference;
  * Otherwise behaves as you would expect.
  */
 public class COWMap<K, V> implements Map<K, V> {
-    private final AtomicReference<Map<K, V>> m_map;
+    private final AtomicReference<ImmutableMap<K, V>> m_map;
 
     public COWMap() {
-        m_map = new AtomicReference<Map<K, V>>(Collections.unmodifiableMap(new TreeMap<K, V>()));
+        m_map = new AtomicReference<ImmutableMap<K, V>>(new Builder<K, V>().build());
     }
 
     public COWMap(Map<K, V> map) {
         if (map == null) {
             throw new IllegalArgumentException("Wrapped map cannot be null");
         }
-        m_map = new AtomicReference<Map<K, V>>(Collections.unmodifiableMap(map));
+        m_map = new AtomicReference<ImmutableMap<K, V>>(new Builder<K, V>().putAll(map).build());
     }
 
     @Override
@@ -69,10 +71,19 @@ public class COWMap<K, V> implements Map<K, V> {
     @Override
     public V put(K key, V value) {
         while (true) {
-            Map<K, V> original = m_map.get();
-            TreeMap<K, V> copy = new TreeMap<K, V>(m_map.get());
-            V oldValue = (V)copy.put(key, value);
-            if (m_map.compareAndSet(original, Collections.unmodifiableMap(copy))) {
+            ImmutableMap<K, V> original = m_map.get();
+            Builder<K, V> builder = new Builder<K, V>();
+            V oldValue = null;
+            for (Map.Entry<K, V> entry : original.entrySet()) {
+                if (entry.getKey().equals(key)) {
+                    oldValue = entry.getValue();
+                    builder.put(key, value);
+                } else {
+                    builder.put(entry);
+                }
+            }
+            ImmutableMap<K, V> copy = builder.build();
+            if (m_map.compareAndSet(original, copy)) {
                 return oldValue;
             }
         }
@@ -81,10 +92,18 @@ public class COWMap<K, V> implements Map<K, V> {
     @Override
     public V remove(Object key) {
         while (true) {
-            Map<K, V> original = m_map.get();
-            TreeMap<K, V> copy = new TreeMap<K, V>(m_map.get());
-            V oldValue = (V)copy.remove(key);
-            if (m_map.compareAndSet(original, Collections.unmodifiableMap(copy))) {
+            ImmutableMap<K, V> original = m_map.get();
+            Builder<K, V> builder = new Builder<K, V>();
+            V oldValue = null;
+            for (Map.Entry<K, V> entry : original.entrySet()) {
+                if (entry.getKey().equals(key)) {
+                    oldValue = entry.getValue();
+                } else {
+                    builder.put(entry);
+                }
+            }
+            ImmutableMap<K, V> copy = builder.build();
+            if (m_map.compareAndSet(original,copy)) {
                 return oldValue;
             }
         }
@@ -93,10 +112,16 @@ public class COWMap<K, V> implements Map<K, V> {
     @Override
     public void putAll(Map<? extends K, ? extends V> m) {
         while (true) {
-            Map<K, V> original = m_map.get();
-            TreeMap<K, V> copy = new TreeMap<K, V>(m_map.get());
-            copy.putAll(m);
-            if (m_map.compareAndSet(original, Collections.unmodifiableMap(copy))) {
+            ImmutableMap<K, V> original = m_map.get();
+            Builder<K, V> builder = new Builder<K, V>();
+            for (Map.Entry<K, V> entry : original.entrySet()) {
+                if (!m.containsKey(entry.getKey())) {
+                    builder.put(entry);
+                }
+            }
+            builder.putAll(m);
+            ImmutableMap<K, V> copy = builder.build();
+            if (m_map.compareAndSet(original, copy)) {
                 return;
             }
         }
@@ -104,13 +129,7 @@ public class COWMap<K, V> implements Map<K, V> {
 
     @Override
     public void clear() {
-        while (true) {
-            Map<K, V> original = m_map.get();
-            TreeMap<K, V> replacement = new TreeMap<K, V>();
-            if (m_map.compareAndSet(original, Collections.unmodifiableMap(replacement))) {
-                return;
-            }
-        }
+        m_map.set(new Builder<K, V>().build());
     }
 
     @Override

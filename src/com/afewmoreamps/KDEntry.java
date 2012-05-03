@@ -21,7 +21,7 @@ class KDEntry {
      * The length of the fixed (not variable size) portion of the key dir header
      * If you change this you need to change the value in KeyDirUnsignedBytes so the comparator still works
      */
-    public static final int SIZE = 17;
+    public static final int SIZE = 37;
     public final int fileId;
     public final int valuePos;
     public final long timestamp;
@@ -39,7 +39,7 @@ class KDEntry {
 
     KDEntry(final byte contents[]) {
         final ByteBuffer buf = ByteBuffer.wrap(contents).order(ByteOrder.nativeOrder());
-        buf.position(contents.length - SIZE);
+        buf.position(20);
         fileId = buf.getInt();
         valuePos = buf.getInt();
         timestamp = buf.getLong();
@@ -59,7 +59,7 @@ class KDEntry {
      */
     public static void toBytes(byte key[], int fileId, int valuePos, long timestamp, byte flags) {
         ByteBuffer out = ByteBuffer.wrap(key).order(ByteOrder.nativeOrder());;
-        out.position(key.length - SIZE);
+        out.position(20);
         out.putInt(fileId);
         out.putInt(valuePos);
         out.putLong(timestamp);

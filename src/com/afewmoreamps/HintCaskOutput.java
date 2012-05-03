@@ -15,29 +15,37 @@ package com.afewmoreamps;
 
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.channels.FileChannel.MapMode;
+import java.security.MessageDigest;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.CRC32;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 
-import com.afewmoreamps.util.CRCSnappyOutputStream;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 
 class HintCaskOutput {
     private final ListeningExecutorService m_thread;
-    private final ByteBuffer m_hintHeader = ByteBuffer.allocate(14);
-    private final CRCSnappyOutputStream m_outputStream;
+    private final FileChannel m_fc;
+    private final CRC32 m_totalCRC = new CRC32();
+    private final ByteBuffer m_buffer = ByteBuffer.allocate((20 + 4 + 8 + 1) * 64);
+
+    /*
+     * Room for 64 key value pairs
+     */
+    private final ByteBuffer m_outBuffer = ByteBuffer.allocateDirect((20 + 4 + 8 + 1) * 64);
 
     HintCaskOutput(final File path) throws IOException {
         if (path.exists()) {
             throw new IOException(path + " already exists");
         }
         FileOutputStream fos = new FileOutputStream(path);
-        FileChannel channel = fos.getChannel();
-        m_outputStream = new CRCSnappyOutputStream(fos, channel);
+        m_fc = fos.getChannel();
+        m_fc.position(4);
 
         final ThreadFactory tf = new ThreadFactory() {
             @Override
@@ -64,7 +72,12 @@ class HintCaskOutput {
         return true;
     }
 
-    void addHints(final byte keys[][], final int positions[], final long timestamps[]) {
+    void addHints(
+            final int numKeys,
+            final byte keys[][],
+            final int positions[],
+            final long timestamps[],
+            final byte flags[]) {
         if (keys.length != positions.length ||
                 timestamps.length  != keys.length || timestamps == null || keys == null || positions == null) {
             throw new IllegalArgumentException();
@@ -74,12 +87,13 @@ class HintCaskOutput {
             @Override
             public void run() {
                 try {
-                    for (int ii = 0; ii < keys.length; ii++) {
-                        m_hintHeader.clear();
+                    m_buffer.clear();
+                    m_buffer.position(4);
+                    for (int ii = 0; ii < numKeys; ii++) {
                         assert(
                                 positions[ii] > 0 ||
                                 positions[ii] == Integer.MIN_VALUE);//Min value is tombstone sentinel
-                        m_hintHeader.putInt( 0, positions[ii]);
+                        m_buffer.putInt( 0, positions[ii]);
                         m_hintHeader.putLong( 4, timestamps[ii]);
                         m_hintHeader.putShort( 12, (short)keys[ii].length);
                         m_outputStream.write(m_hintHeader.array());
@@ -97,6 +111,14 @@ class HintCaskOutput {
     void close() throws InterruptedException, IOException {
         m_thread.shutdown();
         m_thread.awaitTermination(356, TimeUnit.DAYS);
-        m_outputStream.close();
+        m_fc.force(false);
+        m_fc.position(0);
+        ByteBuffer crc = ByteBuffer.allocate(4);
+        crc.putInt(0, (int)m_totalCRC.getValue());
+        while (crc.hasRemaining()) {
+            m_fc.write(crc);
+        }
+        m_fc.force(false);
+        m_fc.close();
     }
 }

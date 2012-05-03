@@ -18,7 +18,7 @@ import java.util.HashMap;
 import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
-import com.google.common.primitives.KeyDirUnsignedBytes;
+import com.google.common.primitives.KeyDirUnsignedBytesComparator;
 
 /*
  * Keys and values are the same object.
@@ -30,7 +30,7 @@ class KeyDir {
     static class SubKeyDir {
         private final ReentrantReadWriteLock m_lock = new ReentrantReadWriteLock(true);
         final TreeMap<byte[], byte[]> m_keys =
-                new TreeMap<byte[], byte[]>( KeyDirUnsignedBytes.lexicographicalComparator());
+                new TreeMap<byte[], byte[]>( new KeyDirUnsignedBytesComparator());
     }
 
     final HashMap<Integer, SubKeyDir> m_subKeyDirs = new HashMap<Integer, SubKeyDir>();
