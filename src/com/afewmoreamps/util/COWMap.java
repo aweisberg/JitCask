@@ -13,10 +13,9 @@
 //limitations under the License.
 package com.afewmoreamps.util;
 
-import java.util.Collection;
 import java.util.Map;
-import java.util.Set;
 
+import com.google.common.collect.ForwardingMap;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMap.Builder;
 import java.util.concurrent.atomic.AtomicReference;
@@ -25,7 +24,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * Key set, value set, and entry set are all immutable as are their iterators.
  * Otherwise behaves as you would expect.
  */
-public class COWMap<K, V> implements Map<K, V> {
+public class COWMap<K, V>  extends ForwardingMap<K, V> implements Map<K, V> {
     private final AtomicReference<ImmutableMap<K, V>> m_map;
 
     public COWMap() {
@@ -40,47 +39,23 @@ public class COWMap<K, V> implements Map<K, V> {
     }
 
     @Override
-    public int size() {
-        return m_map.get().size();
-    }
-
-    public Map<K, V> get() {
-        return m_map.get();
-    }
-
-    @Override
-    public boolean isEmpty() {
-        return m_map.get().isEmpty();
-    }
-
-    @Override
-    public boolean containsKey(Object key) {
-        return m_map.get().containsKey(key);
-    }
-
-    @Override
-    public boolean containsValue(Object value) {
-        return m_map.get().containsValue(value);
-    }
-
-    @Override
-    public V get(Object key) {
-        return m_map.get().get(key);
-    }
-
-    @Override
     public V put(K key, V value) {
         while (true) {
             ImmutableMap<K, V> original = m_map.get();
             Builder<K, V> builder = new Builder<K, V>();
             V oldValue = null;
+            boolean replaced = false;
             for (Map.Entry<K, V> entry : original.entrySet()) {
                 if (entry.getKey().equals(key)) {
                     oldValue = entry.getValue();
                     builder.put(key, value);
+                    replaced = true;
                 } else {
                     builder.put(entry);
                 }
+            }
+            if (!replaced) {
+                builder.put(key, value);
             }
             ImmutableMap<K, V> copy = builder.build();
             if (m_map.compareAndSet(original, copy)) {
@@ -133,17 +108,7 @@ public class COWMap<K, V> implements Map<K, V> {
     }
 
     @Override
-    public Set<K> keySet() {
-        return m_map.get().keySet();
-    }
-
-    @Override
-    public Collection<V> values() {
-        return m_map.get().values();
-    }
-
-    @Override
-    public Set<Map.Entry<K, V>> entrySet() {
-        return m_map.get().entrySet();
+    protected Map<K, V> delegate() {
+        return m_map.get();
     }
 }
