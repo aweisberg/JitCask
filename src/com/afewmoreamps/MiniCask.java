@@ -21,6 +21,8 @@ import java.nio.ByteOrder;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileChannel.MapMode;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -33,7 +35,7 @@ class MiniCask implements Iterable<CaskEntry> {
      */
     private final FileChannel m_outChannel;
     private final MappedByteBuffer m_buffer;
-    static final int HEADER_SIZE = 15;//8-byte timestamp, 1-byte flags, 2-byte key length, 4-byte value length
+    static final int HEADER_SIZE = 41;//8-byte timestamp, 1-byte flags, 20 byte key hash, 4-byte length prefix for compressed payload, two 4-byte CRCs (header, payload)
     private final AtomicInteger m_fileLength;
     final int m_fileId;
     private final int m_maxValidValueSize;
@@ -75,12 +77,12 @@ class MiniCask implements Iterable<CaskEntry> {
     public boolean addEntry(
             int crc,
             byte entry[],
-            byte key[],
+            byte keyHash[],
             byte flags,
             long timestamp,
             boolean isTombstone,
             KeyDir keyDir) throws IOException {
-        if (m_buffer.remaining() < entry.length) {
+        if (m_buffer.remaining() < entry.length + HEADER_SIZE) {
             m_outChannel.truncate(m_buffer.position() + 1);//Forgot why the +1? Maybe I should remove it? Not a good sign
             m_outChannel.close();
             try {
@@ -93,9 +95,21 @@ class MiniCask implements Iterable<CaskEntry> {
             return false;
         }
 
+        ByteBuffer header = ByteBuffer.allocate(HEADER_SIZE - 4).order(ByteOrder.nativeOrder());//doesn't include header CRC
+        header.put(keyHash);
+        header.putLong(timestamp);
+        header.put(flags);
+        header.putInt(crc);
+        header.putInt(entry.length);
+        assert(!header.hasRemaining());
+
+        CRC32 headerCRC = new CRC32();
+        headerCRC.update(header.array());
+
+        final int headerChecksum = (int)headerCRC.getValue();
         final int valuePosition = m_buffer.position();
-        m_buffer.putInt(crc);
-        m_buffer.putInt(entry.length);
+        m_buffer.putInt(headerChecksum);
+        m_buffer.put(header.array());
         m_buffer.put(entry);
 
         if (!isTombstone) {
@@ -103,9 +117,9 @@ class MiniCask implements Iterable<CaskEntry> {
              * Record the new position for this value of the key
              */
             ByteBuffer keyDirEntryBytes =
-                ByteBuffer.allocate(KDEntry.SIZE + key.length).order(ByteOrder.nativeOrder());
-            System.arraycopy(key,0, keyDirEntryBytes.array(), 0, key.length);
-            keyDirEntryBytes.position(key.length);
+                ByteBuffer.allocate(KDEntry.SIZE).order(ByteOrder.nativeOrder());
+            System.arraycopy(keyHash,0, keyDirEntryBytes.array(), 0, 20);
+            keyDirEntryBytes.position(20);
             KDEntry.toBytes(keyDirEntryBytes, m_fileId, valuePosition, timestamp, flags);
             keyDir.put(keyDirEntryBytes.array());
         } else {
@@ -113,7 +127,7 @@ class MiniCask implements Iterable<CaskEntry> {
              * Remove the value from the keydir now that
              * the tombstone has been created
              */
-            keyDir.remove(KeyDir.decorateKey(key));
+            keyDir.remove(KeyDir.decorateKeyHash(keyHash));
         }
         m_fileLength.lazySet(m_buffer.position());
         return true;
@@ -137,6 +151,7 @@ class MiniCask implements Iterable<CaskEntry> {
         ByteBuffer dup = m_buffer.asReadOnlyBuffer().order(ByteOrder.nativeOrder());
         dup.position(position);
 
+        dup.position(dup.position() + 33);//Skip the header info that is only there for recovery
         final int originalCRC = dup.getInt();
         final int entryLength = dup.getInt();
 
@@ -158,10 +173,13 @@ class MiniCask implements Iterable<CaskEntry> {
 
         ByteBuffer entry =
             ByteBuffer.wrap(org.xerial.snappy.Snappy.uncompress(entryBytes)).order(ByteOrder.nativeOrder());
-        entry.position(9);
-        final short keySize = entry.getShort();
+
+        final int keySize = entry.getInt();
         final int valueSize = entry.getInt();
         entry.position(entry.position() + keySize);
+        if (valueSize == -1) {
+            throw new IOException("KeyDir should not point to a tombstone");
+        }
         assert(entry.remaining() == valueSize);
 
         return entry.slice();
@@ -183,8 +201,24 @@ class MiniCask implements Iterable<CaskEntry> {
                         return null;
                     }
                     final int entryStartPosition = view.position();
-                    final int originalCRC = view.getInt();
-                    final int entryLength = view.getInt();
+                    ByteBuffer header = ByteBuffer.allocate(HEADER_SIZE - 4).order(ByteOrder.nativeOrder());
+                    final int originalHeaderCRC = view.getInt();
+                    view.get(header.array());
+
+                    CRC32 headerCRC = new CRC32();
+                    headerCRC.update(header.array());
+                    final int actualHeaderCRC = (int)headerCRC.getValue();
+                    if (actualHeaderCRC != originalHeaderCRC) {
+                        throw new RuntimeException("Header CRC mismatch");
+                    }
+
+                    final byte keyHash[] = new byte[20];
+                    header.get(keyHash);
+                    final long timestamp = header.getLong();
+                    final byte flags = header.get();
+                    final int originalEntryCRC = header.getInt();
+                    final int entryLength = header.getInt();
+
                     if (entryLength < 0 || entryLength > m_maxValidValueSize) {
                         throw new RuntimeException("Invalid value size " + entryLength);
                     }
@@ -193,8 +227,8 @@ class MiniCask implements Iterable<CaskEntry> {
                     CRC32 crc = new CRC32();
                     crc.update(compressedEntryBytes);
 
-                    final int actualCRC = (int)crc.getValue();
-                    if (actualCRC != originalCRC) {
+                    final int actualEntryCRC = (int)crc.getValue();
+                    if (actualEntryCRC != originalEntryCRC) {
                         System.err.println("Had a corrupt entry in " + m_path + " at position " + entryStartPosition);
                         continue;
                     }
@@ -208,14 +242,11 @@ class MiniCask implements Iterable<CaskEntry> {
                         throw new RuntimeException(e);
                     }
 
-                    final long timestamp = entry.getLong();
-                    final byte flags = entry.get();
-
                     /*
                      * Need to know the key size to find the position
                      * of the value size
                      */
-                    final short keySize = entry.getShort();
+                    final int keySize = entry.getInt();
                     if (keySize < 0 || keySize > m_maxValidValueSize) {
                         throw new RuntimeException(
                                 "Length (" + keySize + ") is probably not a valid key, retrieved from " +
@@ -225,7 +256,7 @@ class MiniCask implements Iterable<CaskEntry> {
                     final int valueSize = entry.getInt();
                     if (valueSize < -1 || valueSize > m_maxValidValueSize) {
                         throw new RuntimeException(
-                                "Length (" + keySize + ") is probably not a valid value, retrieved from " +
+                                "Length (" + valueSize + ") is probably not a valid value, retrieved from " +
                                 m_path + " position " + entryStartPosition);
                     }
 
@@ -240,9 +271,11 @@ class MiniCask implements Iterable<CaskEntry> {
                                 MiniCask.this,
                                 timestamp,
                                 flags,
-                                key,
+                                keyHash,
                                 -1,
-                                -1);
+                                -1,
+                                null,
+                                null);
                         break;
                     }
 
@@ -251,9 +284,11 @@ class MiniCask implements Iterable<CaskEntry> {
                             MiniCask.this,
                             timestamp,
                             flags,
-                            key,
+                            keyHash,
                             entryStartPosition,
-                            entryLength + 4);
+                            entryLength + 4,
+                            key,
+                            entry.slice());
                 }
                 assert(newEntry != null);
                 return newEntry;
@@ -312,27 +347,34 @@ class MiniCask implements Iterable<CaskEntry> {
         m_outChannel.force(false);
     }
 
-    public static Object[] constructEntry(byte[] key, byte[] value,
-            long timestamp) throws IOException {
-        ByteBuffer buildBuf =
-            ByteBuffer.allocate(
-                    key.length +
-                    (value == null ? 0 : value.length) +
-                    HEADER_SIZE).order(ByteOrder.nativeOrder());
-        buildBuf.putLong(timestamp);
-        buildBuf.put((byte)0);
-        buildBuf.putShort((short)key.length);
-        buildBuf.putInt(value == null ? -1 : value.length);
-        buildBuf.put(key);
-        if (value != null) {
-            buildBuf.put(value);
+    public static Object[] constructEntry(byte[] key, byte[] value) throws IOException {
+        assert(key != null);
+
+        byte keyHash[] = null;
+        MessageDigest md;
+        try {
+            md = MessageDigest.getInstance("SHA-1");
+            keyHash = md.digest(key);
+        } catch (NoSuchAlgorithmException e) {
+            throw new AssertionError(e);
         }
 
-        byte compressedBytes[] = org.xerial.snappy.Snappy.compress(buildBuf.array());
+        final int keyLength = key.length;
+        final int valueLength = (value != null ? value.length : 0);
 
-        CRC32 crc = new CRC32();
+        ByteBuffer forCompression = ByteBuffer.allocate(8 + keyLength + valueLength).order(ByteOrder.nativeOrder());
+        forCompression.putInt(key.length);
+        forCompression.putInt(value != null ? valueLength : -1);
+        forCompression.put(key);
+        if (value != null) {
+            forCompression.put(value);
+        }
+
+        final byte compressedBytes[] = org.xerial.snappy.Snappy.compress(forCompression.array());
+
+        final CRC32 crc = new CRC32();
         crc.update(compressedBytes);
-        return new Object[] { (int)crc.getValue(), compressedBytes };
+        return new Object[] { (int)crc.getValue(), compressedBytes, keyHash };
     }
 
 }

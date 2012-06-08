@@ -16,6 +16,7 @@ package com.afewmoreamps;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.security.MessageDigest;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -32,6 +33,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import com.afewmoreamps.KeyDir.SubKeyDir;
 import com.afewmoreamps.util.COWMap;
+import com.afewmoreamps.util.COWSortedMap;
 import com.afewmoreamps.util.SettableFuture;
 import com.google.common.util.concurrent.*;
 
@@ -55,7 +57,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
     private final KeyDir m_keyDir = new KeyDir(READ_QUEUE_DEPTH);
 
-    private final COWMap<Integer, MiniCask> m_miniCasks = new COWMap<Integer, MiniCask>();
+    private final COWSortedMap<Integer, MiniCask> m_miniCasks = new COWSortedMap<Integer, MiniCask>();
 
     private MiniCask m_outCask;
 
@@ -242,6 +244,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     private void reloadJitCask() throws IOException {
         int highestIndex = -1;
         for (File f : m_caskPath.listFiles()) {
+            if (f.getName().endsWith(".hintcask")) continue;
             if (!f.getName().endsWith(".minicask")) {
                 throw new IOException("Unrecognized file " + f + " found in cask directory");
             }
@@ -249,7 +252,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             highestIndex = Math.max(caskIndex, highestIndex);
             MiniCask cask =
                 new MiniCask(
-                        f,
+                        f.getParentFile(),
                         caskIndex,
                         m_maxValidValueSize);
             m_miniCasks.put(caskIndex, cask);
@@ -257,20 +260,20 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         m_nextMiniCaskIndex = highestIndex + 1;
 
         for (CaskEntry ce : this) {
-            final byte keyBytes[] = new byte[ce.key.remaining() + KDEntry.SIZE];
-            ce.key.get(keyBytes, 0, ce.key.remaining());
-            final SubKeyDir subKeyDir = m_keyDir.getSubKeyDir(keyBytes);
-            byte entryBytes[] = subKeyDir.m_keys.get(keyBytes);
+            final byte keyHashBytes[] = new byte[KDEntry.SIZE];
+            System.arraycopy(ce.keyHash, 0, keyHashBytes, 0, 20);
+            final SubKeyDir subKeyDir = m_keyDir.getSubKeyDir(keyHashBytes);
+            byte entryBytes[] = subKeyDir.m_keys.get(keyHashBytes);
             if (entryBytes == null) {
                 KDEntry.toBytes(
-                        keyBytes,
+                        keyHashBytes,
                         ce.miniCask.m_fileId,
                         ce.valuePosition,
                         ce.timestamp,
                         ce.flags);
                 subKeyDir.m_keys.put(
-                        keyBytes,
-                        keyBytes);
+                        keyHashBytes,
+                        keyHashBytes);
                 continue;
             }
 
@@ -281,16 +284,16 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
              */
             if (existingEntry.timestamp <= ce.timestamp) {
                 KDEntry.toBytes(
-                        keyBytes,
+                        keyHashBytes,
                         ce.miniCask.m_fileId,
                         ce.valuePosition,
                         ce.timestamp,
                         ce.flags);
-                final Object removed = subKeyDir.m_keys.remove(keyBytes);
+                final Object removed = subKeyDir.m_keys.remove(keyHashBytes);
                 assert(removed != null);
                 subKeyDir.m_keys.put(
-                        keyBytes,
-                        keyBytes);
+                        keyHashBytes,
+                        keyHashBytes);
             }
         }
 
@@ -324,7 +327,9 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             public GetResult call() throws Exception {
                 try {
                     while (true) {
-                        final byte decoratedKey[] = KeyDir.decorateKey(key);
+                        MessageDigest md = MessageDigest.getInstance("SHA-1");
+                        byte keyHash[] = md.digest(key);
+                        final byte decoratedKey[] = KeyDir.decorateKeyHash(keyHash);
                         KDEntry entry = m_keyDir.get(decoratedKey);
                         if (entry == null) {
                             return null;
@@ -372,6 +377,8 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             throw new IllegalArgumentException();
         }
 
+        final int uncompressedSize =
+                key.length + value.length + MiniCask.HEADER_SIZE + 8;//8 is the two length prefixes in the compressed entry
         /*
          * Record when the put started
          */
@@ -401,13 +408,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             m_compressionThreads.submit(new Callable<Object[]>() {
                 @Override
                 public Object[] call() throws Exception {
-                    final long timestamp = getNextTimestamp();
-                    final Object crcAndEntry[] = MiniCask.constructEntry(key, value, timestamp);
-                    return new Object[] {
-                            crcAndEntry[0],
-                            crcAndEntry[1],
-                            timestamp
-                    };
+                    return MiniCask.constructEntry(key, value);
                 }
         });
 
@@ -454,11 +455,11 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
                 final int crc = ((Integer)assembledEntry[0]).intValue();
                 final byte entryBytes[] = (byte[])assembledEntry[1];
-                final long timestamp = ((Long)assembledEntry[2]).longValue();
-                final boolean isTombstone = value == null;
+                final byte keyHash[] = (byte[])assembledEntry[2];
+                final long timestamp = getNextTimestamp();
 
                 try {
-                    putImpl( crc, entryBytes, key, timestamp, isTombstone);
+                    putImpl( crc, entryBytes, keyHash, timestamp, false);
                 } catch (Throwable t) {
                     retval.setException(t);
                     return;
@@ -480,8 +481,8 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                             try {
                                 retval.set(
                                         new PutResult(
-                                                key.length + value.length + MiniCask.HEADER_SIZE + 4,//What goes into the entry, 4 is the CRC
-                                                entryBytes.length,
+                                                uncompressedSize,
+                                                entryBytes.length + MiniCask.HEADER_SIZE,
                                                 (int)(syncTask.get() - start)));
                             } catch (Throwable t) {
                                 retval.setException(t);
@@ -492,8 +493,8 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                 } else {
                     retval.set(
                         new PutResult(
-                            key.length + value.length + MiniCask.HEADER_SIZE + 4,//WHat goes into the entry, 4 is the CRC
-                            entryBytes.length,
+                            uncompressedSize,//WHat goes into the entry, 4 is the CRC
+                            entryBytes.length + MiniCask.HEADER_SIZE,
                              (int)(System.currentTimeMillis() - start)));
                 }
             }
@@ -505,17 +506,18 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     private void putImpl(
             int crc,
             byte entry[],
-            byte key[],
+            byte keyHash[],
             long timestamp,
             boolean isTombstone) throws IOException {
-        if (!m_outCask.addEntry(crc, entry, key, (byte)0, timestamp, isTombstone, m_keyDir)) {
+        assert(keyHash.length == 20);
+        if (!m_outCask.addEntry(crc, entry, keyHash, (byte)0, timestamp, isTombstone, m_keyDir)) {
             m_outCask = new MiniCask(
                     new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"),
                     m_nextMiniCaskIndex,
                     m_maxValidValueSize);
             m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);
             m_nextMiniCaskIndex++;
-            if (!m_outCask.addEntry(crc, entry, key, (byte)0, timestamp, isTombstone, m_keyDir)) {
+            if (!m_outCask.addEntry(crc, entry, keyHash, (byte)0, timestamp, isTombstone, m_keyDir)) {
                 throw new IOException("Unable to place value in an empty bitcask, should never happen");
             }
         }
@@ -533,7 +535,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
      * Should be the only thing sychronizing on the intrinsic lock of this
      * class
      */
-    private synchronized long getNextTimestamp() {
+    private long getNextTimestamp() {
         final long now = System.currentTimeMillis();
 
         if (now < lastReturnedTime) {
@@ -622,10 +624,9 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         },
         MoreExecutors.sameThreadExecutor());
 
-        final long timestamp = getNextTimestamp();
         Object assembledEntryTemp[];
         try {
-            assembledEntryTemp = MiniCask.constructEntry(key, null, timestamp);
+            assembledEntryTemp = MiniCask.constructEntry(key, null);
         } catch (IOException e) {
             retval.setException(e);
             return retval;
@@ -635,8 +636,9 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         m_writeThread.execute(new Runnable() {
             @Override
             public void run() {
+                final long timestamp = getNextTimestamp();
                 try {
-                    putImpl(((Integer)assembledEntry[0]).intValue(), (byte[])assembledEntry[1], key, timestamp, true);
+                    putImpl(((Integer)assembledEntry[0]).intValue(), (byte[])assembledEntry[1], (byte[])assembledEntry[2], timestamp, true);
                 } catch (Throwable t) {
                     retval.setException(t);
                     return;

@@ -48,7 +48,7 @@ class KeyDir {
 
     private int hashByteBuffer(byte key[]) {
         int hash = 1;
-        for (int ii = key.length - (1 + KDEntry.SIZE); ii >= 0; ii--)
+        for (int ii = 19; ii >= 0; ii--)
             hash = 31 * hash + key[ii];
         return hash;
     }
@@ -191,11 +191,10 @@ class KeyDir {
         }
     }
 
-    static byte[] decorateKey(byte key[]) {
-        return Arrays.copyOf(key, key.length + KDEntry.SIZE);
-    }
-
-    static byte[] undecorateKey(byte key[]) {
-        return Arrays.copyOf(key, key.length - KDEntry.SIZE);
+    static byte[] decorateKeyHash(byte keyHash[]) {
+        if (keyHash.length != 20) {
+            throw new IllegalArgumentException("Must be a 20 byte SHA-1 hash");
+        }
+        return Arrays.copyOf(keyHash, KDEntry.SIZE);
     }
 }
