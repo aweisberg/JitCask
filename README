@@ -2,7 +2,7 @@ A pure Java clone of Basho's BitCask.
 
 todo
 ✔1. Configurable fsync behavior, async notification of sync with latency and compression results
-2. Write hint files as you go (saw this reviewing BitCask commits)
+✔2. Write hint files as you go (saw this reviewing BitCask commits)
 3. Add utilization/fragmentation stats for each cask, regenerate stats on reload
 4. Compaction triggered by stats
 5. Multi-threaded hint file reloading
