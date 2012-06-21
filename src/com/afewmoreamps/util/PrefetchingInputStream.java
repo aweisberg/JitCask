@@ -53,9 +53,10 @@ public class PrefetchingInputStream extends InputStream {
         }
 
         int currentReadPosition = (int)channel.position();
-        while (currentReadPosition != channel.size()) {
+        final long channelSize = channel.size();
+        while (currentReadPosition != channelSize) {
             final int readStartingAt = currentReadPosition;
-            final int limit = (int)Math.min(currentReadPosition + prefetchSize, channel.size());
+            final int limit = (int)Math.min(currentReadPosition + prefetchSize, channelSize);
             currentReadPosition += limit;
             readTasks.add(ListenableFutureTask.create(new Callable<ByteBuffer>() {
                 @Override

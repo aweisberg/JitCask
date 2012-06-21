@@ -31,14 +31,22 @@ class HintCaskOutput {
     private final ListeningExecutorService m_thread;
     private final FileChannel m_fc;
     private final CRC32 m_crc = new CRC32();
+    private final CRC32 m_allCRC = new CRC32();
+    static final int ENTRY_SIZE = (20 + 4 + 1 + 4);
+
     private final ByteBuffer m_buffer =
-            ByteBuffer.allocate((20 + 4 + 8 + 1) * 64).order(ByteOrder.nativeOrder());
+            ByteBuffer.allocate(ENTRY_SIZE).order(ByteOrder.nativeOrder());
 
     /*
      * Room for 64 key value pairs
      */
     private final ByteBuffer m_outBuffer =
-            ByteBuffer.allocateDirect((20 + 4 + 8 + 1) * 64).order(ByteOrder.nativeOrder());
+            ByteBuffer.allocateDirect((ENTRY_SIZE) * 64).order(ByteOrder.nativeOrder());
+
+    private byte m_keyHashes[][] = new byte[64][];
+    private int m_positions[] = new int[64];
+    private byte m_flags[] = new byte[64];
+    private int m_pendingMetadataIndex;
 
     HintCaskOutput(final File path) throws IOException {
         if (path.exists()) {
@@ -64,38 +72,47 @@ class HintCaskOutput {
         m_thread = MoreExecutors.listeningDecorator(Executors.newSingleThreadExecutor(tf));
     }
 
-    void addHints(
+    void addHint(byte keyHash[], int position, byte flag) {
+        m_keyHashes[m_pendingMetadataIndex] = keyHash;
+        m_flags[m_pendingMetadataIndex] = flag;
+        m_positions[m_pendingMetadataIndex++] = position;
+        if (m_pendingMetadataIndex >= m_keyHashes.length) {
+            flushHints(m_pendingMetadataIndex, m_keyHashes, m_positions, m_flags);
+        }
+    }
+
+    private void flushHints(
             final int numKeys,
-            final byte keys[][],
+            final byte keyHashes[][],
             final int positions[],
-            final long timestamps[],
             final byte flags[]) {
-        if (keys.length != positions.length ||
-                timestamps.length  != keys.length || timestamps == null || keys == null || positions == null) {
+        if (keyHashes.length != positions.length ||
+                keyHashes == null || positions == null) {
             throw new IllegalArgumentException();
         }
         m_thread.execute(new Runnable() {
             @Override
             public void run() {
                 try {
-                    m_buffer.clear();
-                    m_buffer.position(4);
-                    for (int ii = 0; ii < numKeys; ii++) {
-                        assert(
-                                positions[ii] > 0 ||
-                                positions[ii] == Integer.MIN_VALUE);//Min value is tombstone sentinel
-                        m_buffer.putInt( 0, positions[ii]);
-                        m_buffer.putLong( 4, timestamps[ii]);
-                        m_buffer.put(12, flags[ii]);
-                        m_buffer.put(keys[ii]);
-                    }
-                    m_crc.reset();
-                    m_crc.update(m_buffer.array(), 4, m_buffer.position() - 4);
-                    m_buffer.putInt(0, (int)m_crc.getValue());
-                    m_buffer.flip();
                     m_outBuffer.clear();
-                    m_outBuffer.put(m_buffer);
+                    for (int ii = 0; ii < numKeys; ii++) {
+                        m_buffer.clear();
+                        m_buffer.position(4);
+                        assert(
+                                positions[ii] >= 0 ||
+                                positions[ii] == -1);//-1 value is tombstone sentinel
+                        m_buffer.putInt( positions[ii]);
+                        m_buffer.put(flags[ii]);
+                        m_buffer.put(keyHashes[ii]);
+                        m_crc.reset();
+                        m_crc.update(m_buffer.array(), 4, m_buffer.position() - 4);
+                        m_buffer.putInt(0, (int)m_crc.getValue());
+                        m_allCRC.update(m_buffer.array(), 0, 4);
+                        m_buffer.flip();
+                        m_outBuffer.put(m_buffer);
+                    }
                     m_outBuffer.flip();
+
                     while (m_outBuffer.hasRemaining()) {
                         m_fc.write(m_outBuffer);
                     }
@@ -106,11 +123,26 @@ class HintCaskOutput {
                 }
             }
         });
+        m_keyHashes = new byte[64][];
+        m_positions = new int[64];
+        m_flags = new byte[64];
+        m_pendingMetadataIndex = 0;
     }
 
-    void close() throws InterruptedException, IOException {
+    void close() throws  IOException {
+        flushHints(m_pendingMetadataIndex, m_keyHashes, m_positions, m_flags);
         m_thread.shutdown();
-        m_thread.awaitTermination(356, TimeUnit.DAYS);
+        try {
+            m_thread.awaitTermination(356, TimeUnit.DAYS);
+        } catch (InterruptedException e) {
+            throw new IOException(e);
+        }
+        m_fc.force(false);
+        ByteBuffer allCRCBuf = ByteBuffer.allocate(4).order(ByteOrder.nativeOrder());
+        allCRCBuf.putInt(0, (int)m_allCRC.getValue());
+        while (allCRCBuf.hasRemaining()) {
+            m_fc.write( allCRCBuf, allCRCBuf.position());
+        }
         m_fc.force(false);
         m_fc.close();
     }

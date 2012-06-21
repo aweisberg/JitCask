@@ -21,10 +21,9 @@ class KDEntry {
      * The length of the fixed (not variable size) portion of the key dir header
      * If you change this you need to change the value in KeyDirUnsignedBytes so the comparator still works
      */
-    public static final int SIZE = 37;
+    public static final int SIZE = 29;
     public final int fileId;
     public final int valuePos;
-    public final long timestamp;
     public final byte flags;
 
     /*
@@ -33,7 +32,6 @@ class KDEntry {
     KDEntry() {
         fileId = -1;
         valuePos = -1;
-        timestamp = -1;
         flags = -1;
     }
 
@@ -42,14 +40,12 @@ class KDEntry {
         buf.position(20);
         fileId = buf.getInt();
         valuePos = buf.getInt();
-        timestamp = buf.getLong();
         flags = buf.get();
     }
 
-    public static void toBytes(ByteBuffer out, int fileId, int valuePos, long timestamp, byte flags) {
+    public static void toBytes(ByteBuffer out, int fileId, int valuePos, byte flags) {
         out.putInt(fileId);
         out.putInt(valuePos);
-        out.putLong(timestamp);
         out.put(flags);
         assert(out.position() == out.capacity());
     }
@@ -57,12 +53,11 @@ class KDEntry {
     /*
      * Assumes the key is already decorated, the storage allocated for the key is reused e.g. update in place
      */
-    public static void toBytes(byte key[], int fileId, int valuePos, long timestamp, byte flags) {
-        ByteBuffer out = ByteBuffer.wrap(key).order(ByteOrder.nativeOrder());;
+    public static void toBytes(byte key[], int fileId, int valuePos, byte flags) {
+        ByteBuffer out = ByteBuffer.wrap(key).order(ByteOrder.nativeOrder());
         out.position(20);
         out.putInt(fileId);
         out.putInt(valuePos);
-        out.putLong(timestamp);
         out.put(flags);
         assert(out.position() == out.capacity());
     }

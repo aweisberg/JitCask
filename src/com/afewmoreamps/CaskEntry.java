@@ -17,29 +17,23 @@ import java.nio.ByteBuffer;
 
 class CaskEntry {
     final MiniCask miniCask;
-    final long timestamp;
     final byte flags;
     final byte keyHash[];
     final int valuePosition;
-    final int valueLength;
     final ByteBuffer key;
     final ByteBuffer value;
 
     public CaskEntry(
             MiniCask miniCask,
-            long timestamp,
             byte flags,
             byte keyHash[],
             int valuePosition,
-            int valueLength,
             ByteBuffer key,
             ByteBuffer value) {
         this.miniCask = miniCask;
-        this.timestamp = timestamp;
         this.flags = flags;
         this.keyHash = keyHash;
         this.valuePosition = valuePosition;
-        this.valueLength = valueLength;
         this.key = key;
         this.value = value;
     }

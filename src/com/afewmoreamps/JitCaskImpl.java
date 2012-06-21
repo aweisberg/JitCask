@@ -259,38 +259,24 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         }
         m_nextMiniCaskIndex = highestIndex + 1;
 
-        for (CaskEntry ce : this) {
-            final byte keyHashBytes[] = new byte[KDEntry.SIZE];
-            System.arraycopy(ce.keyHash, 0, keyHashBytes, 0, 20);
-            final SubKeyDir subKeyDir = m_keyDir.getSubKeyDir(keyHashBytes);
-            byte entryBytes[] = subKeyDir.m_keys.get(keyHashBytes);
-            if (entryBytes == null) {
-                KDEntry.toBytes(
-                        keyHashBytes,
-                        ce.miniCask.m_fileId,
-                        ce.valuePosition,
-                        ce.timestamp,
-                        ce.flags);
-                subKeyDir.m_keys.put(
-                        keyHashBytes,
-                        keyHashBytes);
-                continue;
-            }
+        for (MiniCask miniCask : m_miniCasks.values()) {
+            final Iterator<CaskEntry> iter = miniCask.getReloadIterator();
+            while (iter.hasNext()) {
+                final CaskEntry ce = iter.next();
+                final byte keyHashBytes[] = new byte[KDEntry.SIZE];
+                System.arraycopy(ce.keyHash, 0, keyHashBytes, 0, 20);
+                final SubKeyDir subKeyDir = m_keyDir.getSubKeyDir(keyHashBytes);
 
-            KDEntry existingEntry = new KDEntry(entryBytes);
-            /*
-             * Want to do the update even if the timestamp is the same
-             * it means the value was rewritten during compaction
-             */
-            if (existingEntry.timestamp <= ce.timestamp) {
+                if (ce.valuePosition == -1) {
+                    subKeyDir.m_keys.remove(keyHashBytes);
+                    continue;
+                }
+
                 KDEntry.toBytes(
                         keyHashBytes,
                         ce.miniCask.m_fileId,
                         ce.valuePosition,
-                        ce.timestamp,
                         ce.flags);
-                final Object removed = subKeyDir.m_keys.remove(keyHashBytes);
-                assert(removed != null);
                 subKeyDir.m_keys.put(
                         keyHashBytes,
                         keyHashBytes);
@@ -456,10 +442,9 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                 final int crc = ((Integer)assembledEntry[0]).intValue();
                 final byte entryBytes[] = (byte[])assembledEntry[1];
                 final byte keyHash[] = (byte[])assembledEntry[2];
-                final long timestamp = getNextTimestamp();
 
                 try {
-                    putImpl( crc, entryBytes, keyHash, timestamp, false);
+                    putImpl( crc, entryBytes, keyHash, false);
                 } catch (Throwable t) {
                     retval.setException(t);
                     return;
@@ -507,87 +492,19 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             int crc,
             byte entry[],
             byte keyHash[],
-            long timestamp,
             boolean isTombstone) throws IOException {
         assert(keyHash.length == 20);
-        if (!m_outCask.addEntry(crc, entry, keyHash, (byte)0, timestamp, isTombstone, m_keyDir)) {
+        if (!m_outCask.addEntry(crc, entry, keyHash, (byte)0, isTombstone, m_keyDir)) {
             m_outCask = new MiniCask(
                     new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"),
                     m_nextMiniCaskIndex,
                     m_maxValidValueSize);
             m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);
             m_nextMiniCaskIndex++;
-            if (!m_outCask.addEntry(crc, entry, keyHash, (byte)0, timestamp, isTombstone, m_keyDir)) {
+            if (!m_outCask.addEntry(crc, entry, keyHash, (byte)0, isTombstone, m_keyDir)) {
                 throw new IOException("Unable to place value in an empty bitcask, should never happen");
             }
         }
-    }
-
-    private static final long COUNTER_BITS = 6;
-    private static final long TIMESTAMP_BITS = 57;
-    private static final long TIMESTAMP_MAX_VALUE = (1L << TIMESTAMP_BITS) - 1L;
-    private static final long COUNTER_MAX_VALUE = (1L << COUNTER_BITS) - 1L;
-
-    private long lastReturnedTime = System.currentTimeMillis();
-    private long counter = 0;
-
-    /*
-     * Should be the only thing sychronizing on the intrinsic lock of this
-     * class
-     */
-    private long getNextTimestamp() {
-        final long now = System.currentTimeMillis();
-
-        if (now < lastReturnedTime) {
-            if (now < (lastReturnedTime - 10000)) {
-                System.err.println(
-                        "Time traveled backwards more then 10 seconds from " +
-                                lastReturnedTime + " to " + now);
-                System.exit(-1);
-            }
-            while (now <= lastReturnedTime) {
-                try {
-                    Thread.sleep(1);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
-            }
-        }
-
-        if (now > lastReturnedTime) {
-            counter = 0;
-            lastReturnedTime = counter;
-        } else {
-            counter++;
-            if (counter > COUNTER_MAX_VALUE) {
-                while (now <= lastReturnedTime) {
-                    try {
-                        Thread.sleep(1);
-                    } catch (InterruptedException e) {
-                        throw new RuntimeException(e);
-                    }
-                }
-                counter = 0;
-                lastReturnedTime = 0;
-            }
-        }
-        return makeTimestampFromComponents(now, counter);
-    }
-
-    public static long makeTimestampFromComponents(long time, long counter) {
-        long timestamp = time << COUNTER_BITS;
-        assert(time < TIMESTAMP_MAX_VALUE);
-        assert(counter < COUNTER_MAX_VALUE);
-        timestamp |= counter;
-        return timestamp;
-    }
-
-    public static long getCounterFromTimestamp(long timestamp) {
-        return timestamp & COUNTER_MAX_VALUE;
-    }
-
-    public static long getTimeFromTimestamp(long timestamp) {
-        return timestamp >> COUNTER_BITS;
     }
 
     @Override
@@ -636,9 +553,8 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         m_writeThread.execute(new Runnable() {
             @Override
             public void run() {
-                final long timestamp = getNextTimestamp();
                 try {
-                    putImpl(((Integer)assembledEntry[0]).intValue(), (byte[])assembledEntry[1], (byte[])assembledEntry[2], timestamp, true);
+                    putImpl(((Integer)assembledEntry[0]).intValue(), (byte[])assembledEntry[1], (byte[])assembledEntry[2], true);
                 } catch (Throwable t) {
                     retval.setException(t);
                     return;

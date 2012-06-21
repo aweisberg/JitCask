@@ -35,7 +35,7 @@ class MiniCask implements Iterable<CaskEntry> {
      */
     private final FileChannel m_outChannel;
     private final MappedByteBuffer m_buffer;
-    static final int HEADER_SIZE = 41;//8-byte timestamp, 1-byte flags, 20 byte key hash, 4-byte length prefix for compressed payload, two 4-byte CRCs (header, payload)
+    static final int HEADER_SIZE = 33;//1-byte flags, 20 byte key hash, 4-byte length prefix for compressed payload, two 4-byte CRCs (header, payload)
     private final AtomicInteger m_fileLength;
     final int m_fileId;
     private final int m_maxValidValueSize;
@@ -55,7 +55,7 @@ class MiniCask implements Iterable<CaskEntry> {
             if (!existed) {
                 throw new IOException("Can't have a hint file without a cask file");
             }
-            m_hintCaskInput = new HintCaskInput(hintCaskPath);
+            m_hintCaskInput = new HintCaskInput(hintCaskPath, this);
         } else {
             m_hintCaskOutput = new HintCaskOutput(hintCaskPath);
         }
@@ -79,7 +79,6 @@ class MiniCask implements Iterable<CaskEntry> {
             byte entry[],
             byte keyHash[],
             byte flags,
-            long timestamp,
             boolean isTombstone,
             KeyDir keyDir) throws IOException {
         if (m_buffer.remaining() < entry.length + HEADER_SIZE) {
@@ -87,8 +86,6 @@ class MiniCask implements Iterable<CaskEntry> {
             m_outChannel.close();
             try {
                 m_hintCaskOutput.close();
-            } catch (InterruptedException e) {
-                throw new IOException(e);
             } finally {
                 m_hintCaskOutput = null;
             }
@@ -97,7 +94,6 @@ class MiniCask implements Iterable<CaskEntry> {
 
         ByteBuffer header = ByteBuffer.allocate(HEADER_SIZE - 4).order(ByteOrder.nativeOrder());//doesn't include header CRC
         header.put(keyHash);
-        header.putLong(timestamp);
         header.put(flags);
         header.putInt(crc);
         header.putInt(entry.length);
@@ -113,6 +109,7 @@ class MiniCask implements Iterable<CaskEntry> {
         m_buffer.put(entry);
 
         if (!isTombstone) {
+            m_hintCaskOutput.addHint(keyHash, valuePosition, flags);
             /*
              * Record the new position for this value of the key
              */
@@ -120,9 +117,10 @@ class MiniCask implements Iterable<CaskEntry> {
                 ByteBuffer.allocate(KDEntry.SIZE).order(ByteOrder.nativeOrder());
             System.arraycopy(keyHash,0, keyDirEntryBytes.array(), 0, 20);
             keyDirEntryBytes.position(20);
-            KDEntry.toBytes(keyDirEntryBytes, m_fileId, valuePosition, timestamp, flags);
+            KDEntry.toBytes(keyDirEntryBytes, m_fileId, valuePosition, flags);
             keyDir.put(keyDirEntryBytes.array());
         } else {
+            m_hintCaskOutput.addHint(keyHash, -1, flags);
             /*
              * Remove the value from the keydir now that
              * the tombstone has been created
@@ -151,7 +149,7 @@ class MiniCask implements Iterable<CaskEntry> {
         ByteBuffer dup = m_buffer.asReadOnlyBuffer().order(ByteOrder.nativeOrder());
         dup.position(position);
 
-        dup.position(dup.position() + 33);//Skip the header info that is only there for recovery
+        dup.position(dup.position() + 25);//Skip the header info that is only there for recovery
         final int originalCRC = dup.getInt();
         final int entryLength = dup.getInt();
 
@@ -185,6 +183,18 @@ class MiniCask implements Iterable<CaskEntry> {
         return entry.slice();
     }
 
+    /*
+     * Get an iterator that populates cask entries with just enough info to reload the
+     * key dir.
+     */
+    public Iterator<CaskEntry> getReloadIterator() throws IOException {
+        if (m_hintCaskInput.validateChecksum()) {
+            return m_hintCaskInput.hintIterator();
+        } else {
+            return iterator();
+        }
+    }
+
     @Override
     public Iterator<CaskEntry> iterator() {
         final ByteBuffer view = m_buffer.asReadOnlyBuffer().order(ByteOrder.nativeOrder());
@@ -214,7 +224,6 @@ class MiniCask implements Iterable<CaskEntry> {
 
                     final byte keyHash[] = new byte[20];
                     header.get(keyHash);
-                    final long timestamp = header.getLong();
                     final byte flags = header.get();
                     final int originalEntryCRC = header.getInt();
                     final int entryLength = header.getInt();
@@ -269,10 +278,8 @@ class MiniCask implements Iterable<CaskEntry> {
                         //Tombstone
                         newEntry = new CaskEntry(
                                 MiniCask.this,
-                                timestamp,
                                 flags,
                                 keyHash,
-                                -1,
                                 -1,
                                 null,
                                 null);
@@ -282,11 +289,9 @@ class MiniCask implements Iterable<CaskEntry> {
                     newEntry =
                         new CaskEntry(
                             MiniCask.this,
-                            timestamp,
                             flags,
                             keyHash,
                             entryStartPosition,
-                            entryLength + 4,
                             key,
                             entry.slice());
                 }
@@ -332,6 +337,9 @@ class MiniCask implements Iterable<CaskEntry> {
                     }
                 }
             }
+        }
+        if (m_hintCaskOutput != null) {
+            m_hintCaskOutput.close();
         }
     }
 

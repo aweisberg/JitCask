@@ -53,7 +53,7 @@ public class JitCaskImplTest {
         config.syncInterval = 5000;
         JitCaskImpl jc = new JitCaskImpl(config);
 
-        jc.open();
+         jc.open();
 
         final int keyCount = 10000;
         final int seed = 42;
