@@ -17,7 +17,6 @@ import java.nio.ByteBuffer;
 
 class CaskEntry {
     final MiniCask miniCask;
-    final byte flags;
     final byte keyHash[];
     final int valuePosition;
     final ByteBuffer key;
@@ -25,13 +24,11 @@ class CaskEntry {
 
     public CaskEntry(
             MiniCask miniCask,
-            byte flags,
             byte keyHash[],
             int valuePosition,
             ByteBuffer key,
             ByteBuffer value) {
         this.miniCask = miniCask;
-        this.flags = flags;
         this.keyHash = keyHash;
         this.valuePosition = valuePosition;
         this.key = key;

@@ -13,7 +13,6 @@
 //limitations under the License.
 package com.afewmoreamps;
 
-import java.io.EOFException;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -21,30 +20,17 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
 
-import com.afewmoreamps.util.DirectMemoryUtils;
 import com.afewmoreamps.util.PrefetchingInputStream;
-import com.google.common.util.concurrent.ListenableFutureTask;
 
 class HintCaskInput {
     private final FileInputStream m_fis;
     private final FileChannel m_channel;
-    private final File m_path;
     private PrefetchingInputStream m_pis;//used when retrieving the actual keys
     private final MiniCask m_miniCask;
 
     HintCaskInput(final File path, MiniCask mc) throws IOException {
-        this.m_path = path;
         if (!path.exists()) {
             throw new IOException(path + " does not exist");
         }
@@ -147,12 +133,10 @@ class HintCaskInput {
             public CaskEntry next() {
                 entryBuffer.position(4);
                 final int valuePosition = entryBuffer.getInt();
-                final byte flags = entryBuffer.get();
                 final byte keyHash[] = new byte[20];
                 entryBuffer.get(keyHash);
                 final CaskEntry entry = new CaskEntry(
                         m_miniCask,
-                        flags,
                         keyHash,
                         valuePosition,
                         null,

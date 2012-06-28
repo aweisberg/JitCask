@@ -111,7 +111,7 @@ public final class KeyDirUnsignedBytesComparator implements Comparator<byte[]> {
         long lw1 = theUnsafe.getLong(left, BYTE_ARRAY_BASE_OFFSET);
         long rw1 = theUnsafe.getLong(right, BYTE_ARRAY_BASE_OFFSET);
 
-        assert(left.length == right.length && left.length == 29);
+        assert(left.length == right.length && left.length == 28);
         long diff1 = lw1 ^ rw1;
 
         if (diff1 != 0) {

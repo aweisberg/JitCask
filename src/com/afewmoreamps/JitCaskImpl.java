@@ -275,8 +275,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                 KDEntry.toBytes(
                         keyHashBytes,
                         ce.miniCask.m_fileId,
-                        ce.valuePosition,
-                        ce.flags);
+                        ce.valuePosition);
                 subKeyDir.m_keys.put(
                         keyHashBytes,
                         keyHashBytes);
@@ -353,29 +352,21 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         return put(
                 key,
                 value,
-                (m_syncByDefault ? PUTFLAG_SYNC : 0));
+                m_syncByDefault);
     }
 
     @Override
-    public ListenableFuture<PutResult> put(final byte[] key, final byte[] value,
-            int flags) {
+    public ListenableFuture<PutResult> put(final byte[] key, final byte[] value, final boolean waitForSync) {
         if (key == null || value == null) {
             throw new IllegalArgumentException();
         }
 
         final int uncompressedSize =
-                key.length + value.length + MiniCask.HEADER_SIZE + 8;//8 is the two length prefixes in the compressed entry
+                key.length + value.length + MiniCask.HEADER_SIZE + 8;//8 is the length prefixes in the compressed entry for the key and value
         /*
          * Record when the put started
          */
         final long start = System.currentTimeMillis();
-
-        /*
-         * Parse out the flag for whether the future should be set
-         * when the data is synced or whether it should be set
-         * as soon as the data is written to the file descriptor
-         */
-        final boolean waitForSync = (flags & PUTFLAG_SYNC) != 0;
 
         /*
          * This is the return value that will be set with the result
@@ -439,12 +430,11 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                     return;
                 }
 
-                final int crc = ((Integer)assembledEntry[0]).intValue();
-                final byte entryBytes[] = (byte[])assembledEntry[1];
-                final byte keyHash[] = (byte[])assembledEntry[2];
+                final byte entryBytes[] = (byte[])assembledEntry[0];
+                final byte keyHash[] = (byte[])assembledEntry[1];
 
                 try {
-                    putImpl( crc, entryBytes, keyHash, false);
+                    putImpl( entryBytes, keyHash, false);
                 } catch (Throwable t) {
                     retval.setException(t);
                     return;
@@ -467,7 +457,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                                 retval.set(
                                         new PutResult(
                                                 uncompressedSize,
-                                                entryBytes.length + MiniCask.HEADER_SIZE,
+                                                entryBytes.length,
                                                 (int)(syncTask.get() - start)));
                             } catch (Throwable t) {
                                 retval.setException(t);
@@ -478,8 +468,8 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
                 } else {
                     retval.set(
                         new PutResult(
-                            uncompressedSize,//WHat goes into the entry, 4 is the CRC
-                            entryBytes.length + MiniCask.HEADER_SIZE,
+                            uncompressedSize,
+                            entryBytes.length,
                              (int)(System.currentTimeMillis() - start)));
                 }
             }
@@ -489,19 +479,18 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
     }
 
     private void putImpl(
-            int crc,
             byte entry[],
             byte keyHash[],
             boolean isTombstone) throws IOException {
         assert(keyHash.length == 20);
-        if (!m_outCask.addEntry(crc, entry, keyHash, (byte)0, isTombstone, m_keyDir)) {
+        if (!m_outCask.addEntry(entry, keyHash,isTombstone, m_keyDir)) {
             m_outCask = new MiniCask(
                     new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"),
                     m_nextMiniCaskIndex,
                     m_maxValidValueSize);
             m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);
             m_nextMiniCaskIndex++;
-            if (!m_outCask.addEntry(crc, entry, keyHash, (byte)0, isTombstone, m_keyDir)) {
+            if (!m_outCask.addEntry(entry, keyHash, isTombstone, m_keyDir)) {
                 throw new IOException("Unable to place value in an empty bitcask, should never happen");
             }
         }
@@ -509,21 +498,15 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
 
     @Override
     public ListenableFuture<RemoveResult> remove(final byte key[]) {
-        return remove(key, (m_syncByDefault ? PUTFLAG_SYNC : 0));
+        return remove(key, m_syncByDefault);
     }
 
     @Override
-    public ListenableFuture<RemoveResult> remove(final byte[] key, int flags) {
+    public ListenableFuture<RemoveResult> remove(final byte[] key, final boolean waitForSync) {
         if (key == null) {
             throw new IllegalArgumentException();
         }
 
-        /*
-         * Parse out the flag for whether the future should be set
-         * when the data is synced or whether it should be set
-         * as soon as the data is written to the file descriptor
-         */
-        final boolean waitForSync = (flags & PUTFLAG_SYNC) != 0;
         final long start = System.currentTimeMillis();
 
         try {
@@ -554,7 +537,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             @Override
             public void run() {
                 try {
-                    putImpl(((Integer)assembledEntry[0]).intValue(), (byte[])assembledEntry[1], (byte[])assembledEntry[2], true);
+                    putImpl((byte[])assembledEntry[0], (byte[])assembledEntry[1], true);
                 } catch (Throwable t) {
                     retval.setException(t);
                     return;

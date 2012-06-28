@@ -23,10 +23,10 @@ public interface JitCask {
     public ListenableFuture<GetResult> get(byte key[]);
 
     public ListenableFuture<PutResult> put(byte key[], byte value[]);
-    public ListenableFuture<PutResult> put(byte key[], byte value[], int flags);
+    public ListenableFuture<PutResult> put(byte key[], byte value[], boolean waitForSync);
 
     public ListenableFuture<RemoveResult> remove(byte key[]);
-    public ListenableFuture<RemoveResult> remove(byte key[], int flags);
+    public ListenableFuture<RemoveResult> remove(byte key[], boolean waitForSync);
 
     public void close() throws IOException;
 }

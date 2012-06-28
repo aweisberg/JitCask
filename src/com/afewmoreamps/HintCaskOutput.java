@@ -32,7 +32,7 @@ class HintCaskOutput {
     private final FileChannel m_fc;
     private final CRC32 m_crc = new CRC32();
     private final CRC32 m_allCRC = new CRC32();
-    static final int ENTRY_SIZE = (20 + 4 + 1 + 4);
+    static final int ENTRY_SIZE = (20 + 4 + 4);
 
     private final ByteBuffer m_buffer =
             ByteBuffer.allocate(ENTRY_SIZE).order(ByteOrder.nativeOrder());
@@ -45,7 +45,6 @@ class HintCaskOutput {
 
     private byte m_keyHashes[][] = new byte[64][];
     private int m_positions[] = new int[64];
-    private byte m_flags[] = new byte[64];
     private int m_pendingMetadataIndex;
 
     HintCaskOutput(final File path) throws IOException {
@@ -72,20 +71,18 @@ class HintCaskOutput {
         m_thread = MoreExecutors.listeningDecorator(Executors.newSingleThreadExecutor(tf));
     }
 
-    void addHint(byte keyHash[], int position, byte flag) {
+    void addHint(byte keyHash[], int position) {
         m_keyHashes[m_pendingMetadataIndex] = keyHash;
-        m_flags[m_pendingMetadataIndex] = flag;
         m_positions[m_pendingMetadataIndex++] = position;
         if (m_pendingMetadataIndex >= m_keyHashes.length) {
-            flushHints(m_pendingMetadataIndex, m_keyHashes, m_positions, m_flags);
+            flushHints(m_pendingMetadataIndex, m_keyHashes, m_positions);
         }
     }
 
     private void flushHints(
             final int numKeys,
             final byte keyHashes[][],
-            final int positions[],
-            final byte flags[]) {
+            final int positions[]) {
         if (keyHashes.length != positions.length ||
                 keyHashes == null || positions == null) {
             throw new IllegalArgumentException();
@@ -102,7 +99,6 @@ class HintCaskOutput {
                                 positions[ii] >= 0 ||
                                 positions[ii] == -1);//-1 value is tombstone sentinel
                         m_buffer.putInt( positions[ii]);
-                        m_buffer.put(flags[ii]);
                         m_buffer.put(keyHashes[ii]);
                         m_crc.reset();
                         m_crc.update(m_buffer.array(), 4, m_buffer.position() - 4);
@@ -125,12 +121,11 @@ class HintCaskOutput {
         });
         m_keyHashes = new byte[64][];
         m_positions = new int[64];
-        m_flags = new byte[64];
         m_pendingMetadataIndex = 0;
     }
 
     void close() throws  IOException {
-        flushHints(m_pendingMetadataIndex, m_keyHashes, m_positions, m_flags);
+        flushHints(m_pendingMetadataIndex, m_keyHashes, m_positions);
         m_thread.shutdown();
         try {
             m_thread.awaitTermination(356, TimeUnit.DAYS);
