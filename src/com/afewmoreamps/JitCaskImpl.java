@@ -17,6 +17,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -32,7 +33,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.afewmoreamps.KeyDir.SubKeyDir;
-import com.afewmoreamps.util.COWMap;
 import com.afewmoreamps.util.COWSortedMap;
 import com.afewmoreamps.util.SettableFuture;
 import com.google.common.util.concurrent.*;
@@ -192,6 +192,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         m_outCask = new MiniCask(
                 m_caskPath,
                 m_nextMiniCaskIndex,
+                null,
                 m_maxValidValueSize);
         m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);
         m_nextMiniCaskIndex++;
@@ -248,12 +249,15 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             if (!f.getName().endsWith(".minicask")) {
                 throw new IOException("Unrecognized file " + f + " found in cask directory");
             }
-            int caskIndex = Integer.valueOf(f.getName().substring(0, f.getName().length() - 9));
+            String fields[] = f.getName().substring(0, f.getName().length() - 9).split("-");
+            int caskIndex = Integer.valueOf(fields[0]);
+            long timestamp = Integer.valueOf(fields[1]);
             highestIndex = Math.max(caskIndex, highestIndex);
             MiniCask cask =
                 new MiniCask(
                         f.getParentFile(),
                         caskIndex,
+                        timestamp,
                         m_maxValidValueSize);
             m_miniCasks.put(caskIndex, cask);
         }
@@ -487,6 +491,7 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
             m_outCask = new MiniCask(
                     new File(m_caskPath, m_nextMiniCaskIndex + ".minicask"),
                     m_nextMiniCaskIndex,
+                    null,
                     m_maxValidValueSize);
             m_miniCasks.put(m_nextMiniCaskIndex, m_outCask);
             m_nextMiniCaskIndex++;
@@ -524,20 +529,27 @@ class JitCaskImpl implements JitCask, Iterable<CaskEntry> {
         },
         MoreExecutors.sameThreadExecutor());
 
-        Object assembledEntryTemp[];
+        MessageDigest md = null;
         try {
-            assembledEntryTemp = MiniCask.constructEntry(key, null);
-        } catch (IOException e) {
+            md = MessageDigest.getInstance("SHA-1");
+        } catch (NoSuchAlgorithmException e) {
             retval.setException(e);
             return retval;
         }
-        final Object assembledEntry[] = assembledEntryTemp;
+
+        final byte keyHash[] = md.digest(key);
 
         m_writeThread.execute(new Runnable() {
             @Override
             public void run() {
+                KDEntry entry = m_keyDir.get(KeyDir.decorateKeyHash(keyHash));
+                if (entry == null) {
+                    retval.set(new RemoveResult((int)(System.currentTimeMillis() - start)));
+                    return;
+                }
+                final MiniCask mc = m_miniCasks.get(entry.fileId);
                 try {
-                    putImpl((byte[])assembledEntry[0], (byte[])assembledEntry[1], true);
+                    putImpl( MiniCask.constructTombstoneEntry(keyHash, entry.fileId, mc.m_timestamp), keyHash, true);
                 } catch (Throwable t) {
                     retval.setException(t);
                     return;

@@ -29,6 +29,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.CRC32;
 
 class MiniCask implements Iterable<CaskEntry> {
+
+    private int m_activeKeys;
+    private int m_deletedKeys;
+
     private final File m_path;
     /*
      * Kept around for truncation at the end
@@ -38,6 +42,7 @@ class MiniCask implements Iterable<CaskEntry> {
     static final int HEADER_SIZE = 8;
     private final AtomicInteger m_fileLength;
     final int m_fileId;
+    final long m_timestamp;
     private final int m_maxValidValueSize;
     private HintCaskOutput m_hintCaskOutput;
     private HintCaskInput m_hintCaskInput;
@@ -45,12 +50,15 @@ class MiniCask implements Iterable<CaskEntry> {
     public MiniCask(
             File path,
             int id,
+            Long timestamp,
             int maxValidValueSize) throws IOException {
         m_maxValidValueSize = maxValidValueSize;
-        m_path = new File(path, id + ".minicask");
+        String filename = id + "-" + timestamp;
+        m_timestamp = timestamp;
+        m_path = new File(path, filename + ".minicask");
         final boolean existed = m_path.exists();
         m_fileId = id;
-        File hintCaskPath = new File(path, id + ".hintcask");
+        File hintCaskPath = new File(path, filename + ".hintcask");
         if (hintCaskPath.exists()) {
             if (!existed) {
                 throw new IOException("Can't have a hint file without a cask file");
@@ -341,17 +349,13 @@ class MiniCask implements Iterable<CaskEntry> {
         }
 
         final int keyLength = key.length;
-        final int valueLength = (value != null ? value.length : 0);
+        final int valueLength = value.length;
 
-        ByteBuffer forCompression = ByteBuffer.allocate(8 + (value != null ? keyLength : 20) + valueLength).order(ByteOrder.nativeOrder());
-        forCompression.putInt(value != null ? keyLength : -1);
-        forCompression.putInt(value != null ? valueLength : -1);
-        if (value != null) {
-            forCompression.put(key);
-            forCompression.put(value);
-        } else {
-            forCompression.put(keyHash);
-        }
+        ByteBuffer forCompression = ByteBuffer.allocate(8 + keyLength + valueLength).order(ByteOrder.nativeOrder());
+        forCompression.putInt(keyLength);
+        forCompression.putInt(valueLength);
+        forCompression.put(key);
+        forCompression.put(value);
 
         final byte compressedBytes[] = org.xerial.snappy.Snappy.compress(forCompression.array());
         ByteBuffer finalBuf =
@@ -366,6 +370,25 @@ class MiniCask implements Iterable<CaskEntry> {
         finalBuf.putInt(0, (int)crc.getValue());
 
         return new Object[] { finalBuf.array(), keyHash };
+    }
+
+    public static byte[] constructTombstoneEntry(byte keyHash[], int fileId, long timestamp) {
+        /*
+         * A tombstone contains the usual CRC and length prefix (which is -1 to sigil a tombstone,
+         * as well as the 20 byte hash, 4 byte fileid and 8 byte timestamp for the version of the file that
+         * contains the deleted entry. The tombstone must remain as long as that version of the file is present
+         */
+        ByteBuffer entryBuf = ByteBuffer.allocate(8 + 20 + 4 + 8);
+        entryBuf.position(4);
+        entryBuf.putInt(-1);
+        entryBuf.put(keyHash);
+        entryBuf.putLong(timestamp);
+
+        final CRC32 crc = new CRC32();
+        crc.update(entryBuf.array(), 4, entryBuf.capacity() - 4);
+        entryBuf.putInt(0, (int)crc.getValue());
+
+        return entryBuf.array();
     }
 
 }
